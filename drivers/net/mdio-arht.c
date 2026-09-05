@@ -17,7 +17,7 @@
 #define ARHT_MDIO_CMD_C45_ADDR			0x80000000
 #define ARHT_MDIO_CMD_C45_WRITE			0x80040000
 #define ARHT_MDIO_CMD_C22_WRITE			0x80050000
-#define ARHT_MDIO_CMD_C45_READ			0x800c0000
+#define ARHT_MDIO_CMD_C45_READ			0x80080000 /* post-read-increment */
 #define ARHT_MDIO_CMD_C22_READ			0x80090000
 
 #define ARHT_MDIO_TIMEOUT_US			10000
@@ -40,11 +40,34 @@ static int arht_mdio_wait_ready(struct arht_mdio_priv *priv, u32 *val)
 	return ret;
 }
 
+static int arht_mdio_validate(int addr, int devad, int reg)
+{
+	int max_reg;
+
+	if (addr < 0 || addr > FIELD_MAX(ARHT_MDIO_PHY_ADDR))
+		return -EINVAL;
+
+	if (devad != MDIO_DEVAD_NONE &&
+	    (devad < 0 || devad > FIELD_MAX(ARHT_MDIO_DEVAD)))
+		return -EINVAL;
+
+	max_reg = devad == MDIO_DEVAD_NONE ? FIELD_MAX(ARHT_MDIO_REG) :
+		  FIELD_MAX(ARHT_MDIO_DATA);
+	if (reg < 0 || reg > max_reg)
+		return -EINVAL;
+
+	return 0;
+}
+
 static int arht_mdio_read(struct udevice *dev, int addr, int devad, int reg)
 {
 	struct arht_mdio_priv *priv = dev_get_priv(dev);
 	u32 cmd, val;
 	int ret;
+
+	ret = arht_mdio_validate(addr, devad, reg);
+	if (ret)
+		return ret;
 
 	if (devad != MDIO_DEVAD_NONE) {
 		ret = arht_mdio_wait_ready(priv, NULL);
@@ -89,6 +112,10 @@ static int arht_mdio_write(struct udevice *dev, int addr, int devad, int reg,
 	struct arht_mdio_priv *priv = dev_get_priv(dev);
 	u32 cmd;
 	int ret;
+
+	ret = arht_mdio_validate(addr, devad, reg);
+	if (ret)
+		return ret;
 
 	if (devad != MDIO_DEVAD_NONE) {
 		ret = arht_mdio_wait_ready(priv, NULL);
