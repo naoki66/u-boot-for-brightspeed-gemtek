@@ -6,6 +6,15 @@ on:
       - "**"
   workflow_dispatch:
     inputs:
+      board:
+        description: Board to build (both builds xg2010g and xr1710g)
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - xg2010g
+          - xr1710g
       release_type:
         description: Build only, create a pre-release, or create a release
         required: true
@@ -46,13 +55,47 @@ permissions:
   contents: read
 
 jobs:
+  select-boards:
+    name: Select boards to build
+    runs-on: ubuntu-latest
+    outputs:
+      boards: ${{ steps.select.outputs.boards }}
+    steps:
+      - name: Resolve board selection
+        id: select
+        env:
+          REQUESTED_BOARD: ${{ inputs.board }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            BOARD="${REQUESTED_BOARD:-both}"
+          else
+            # push 触发时始终编译两块板
+            BOARD="both"
+          fi
+          case "$BOARD" in
+            both)
+              boards='["xg2010g", "xr1710g"]'
+              ;;
+            xg2010g|xr1710g)
+              boards="[\"${BOARD}\"]"
+              ;;
+            *)
+              echo "Unsupported board selection: ${BOARD}" >&2
+              exit 1
+              ;;
+          esac
+          echo "boards=${boards}" >> "$GITHUB_OUTPUT"
+          echo "Boards to build: ${boards}"
+
   build:
     name: Build U-Boot and signed mtd0 (${{ matrix.board }})
+    needs: select-boards
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        board: [xg2010g, xr1710g]
+        board: ${{ fromJSON(needs.select-boards.outputs.boards) }}
     outputs:
       artifact_name: ${{ steps.artifact.outputs.artifact_name }}
       bl31_name: ${{ steps.artifact.outputs.bl31_name }}
@@ -168,12 +211,14 @@ jobs:
             xz-utils
 
       - name: Configure U-Boot
+        env:
+          BOARD: ${{ matrix.board }}
         run: |
           set -euo pipefail
           # GitHub runners are normally fresh, but keep the build deterministic
           # when this workflow is replayed on a reused workspace.
           make distclean
-          make ${DEFCONFIG}
+          make "${BOARD}_defconfig"
 
       - name: Build U-Boot
         run: |
@@ -647,7 +692,7 @@ jobs:
 
   release:
     name: Publish signed mtd0 release
-    needs: build
+    needs: [select-boards, build]
     if: ${{ github.event_name == 'workflow_dispatch' && needs.build.outputs.build_mode != 'test' }}
     runs-on: ubuntu-latest
     permissions:
@@ -661,6 +706,7 @@ jobs:
 
       - name: Flatten and verify per-board assets
         env:
+          BOARDS_JSON: ${{ needs.select-boards.outputs.boards }}
           COMMIT: ${{ needs.build.outputs.commit }}
           RELEASE_DATE: ${{ needs.build.outputs.release_date }}
         run: |
@@ -670,7 +716,8 @@ jobs:
           find release-output -mindepth 2 -maxdepth 2 -type f -exec mv -f {} release-output/ \;
           find release-output -mindepth 1 -maxdepth 1 -type d -empty -delete
 
-          for board in xg2010g xr1710g; do
+          mapfile -t BOARDS < <(jq -r '.[]' <<<"$BOARDS_JSON")
+          for board in "${BOARDS[@]}"; do
             for suffix in mtd0-signed.bin fip-signed.bin ubi-preloader.bin ubi-bl31-uboot.fip bl31.bin u-boot-raw.bin sha256sums.txt build-info.txt; do
               file="release-output/${board}-${RELEASE_DATE}-${COMMIT}-${suffix}"
               if [ ! -s "$file" ]; then
@@ -682,6 +729,7 @@ jobs:
 
       - name: Create or update GitHub Release
         env:
+          BOARDS_JSON: ${{ needs.select-boards.outputs.boards }}
           COMMIT: ${{ needs.build.outputs.commit }}
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -691,11 +739,25 @@ jobs:
           RELEASE_TITLE: Brightspeed Gemtek signed mtd0-${{ needs.build.outputs.release_date }}-g${{ needs.build.outputs.commit }}
         run: |
           set -euo pipefail
+          mapfile -t BOARDS < <(jq -r '.[]' <<<"$BOARDS_JSON")
           paths=()
-          for board in xg2010g xr1710g; do
+          for board in "${BOARDS[@]}"; do
             for suffix in mtd0-signed.bin fip-signed.bin ubi-preloader.bin ubi-bl31-uboot.fip bl31.bin u-boot-raw.bin sha256sums.txt build-info.txt; do
               paths+=("release-output/${board}-${RELEASE_DATE}-${COMMIT}-${suffix}")
             done
+          done
+
+          boards_line=""
+          for board in "${BOARDS[@]}"; do
+            case "$board" in
+              xg2010g) desc='`xg2010g` (Brightspeed Gemtek XG2010G)' ;;
+              xr1710g) desc='`xr1710g` (Brightspeed Gemtek XR1710G)' ;;
+              *) desc="\`${board}\`" ;;
+            esac
+            if [ -n "$boards_line" ]; then
+              boards_line+=", "
+            fi
+            boards_line+="$desc"
           done
 
           notes_file=$(mktemp)
@@ -704,9 +766,9 @@ jobs:
 
           **Release channel:** ${RELEASE_MODE}
 
-          **Boards:** \`xg2010g\` (Brightspeed Gemtek XG2010G) and \`xr1710g\` (Brightspeed Gemtek XR1710G).
+          **Boards:** ${boards_line}
 
-          ## Files (per board, prefix \`<board>\` = \`xg2010g\` or \`xr1710g\`)
+          ## Files (per selected board)
 
           - \`<board>-${RELEASE_DATE}-${COMMIT}-mtd0-signed.bin\` - 2 MiB \`/dev/mtd0\` bootloader image. Contains preserved prefix, BL2, BL31, signed certificates, and this repository's U-Boot as BL33.
           - \`<board>-${RELEASE_DATE}-${COMMIT}-fip-signed.bin\` - signed FIP only, placed at the configured mtd0 FIP offset.
