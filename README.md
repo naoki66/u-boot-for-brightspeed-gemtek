@@ -114,7 +114,7 @@ signed mtd0/FIP。
 | 🧬 | 源码构建 BL2/BL31 | 固定 Airoha TF-A、Mbed TLS、Arm GNU Toolchain 与 LZMA 版本 |
 | 🔧 | 固定签名工具链 | TF-A tooling 锁定 `v2.10`，用于生成 FIP 与证书 |
 | 🛟 | 双救砖路径 | BootROM X 模式 XMODEM 两段传输 + Web Recovery 重建 UBI |
-| 📦 | 完整交付物 | 每次构建附带 `sha256sums.txt` 与 `build-info.txt`（commit、日期、边界） |
+| 📦 | 完整交付物 | 每个 Release 按 `<board>-<YYYY-M-D>-<commit>-` 命名 9 个产物，附 `sha256sums.txt` 与 `build-info.txt`（commit、日期、镜像边界） |
 
 <p align="right"><a href="#top"><b>↑ 返回顶部</b></a></p>
 
@@ -282,24 +282,44 @@ U-Boot/Recovery 会校验项目 `ubi` 的 440 MiB 分区及 128 KiB/2 KiB 几何
 
 ```mermaid
 flowchart TD
-    R["GitHub Release / workflow artifact"] --> M["mtd0-signed.bin<br/>完整 2 MiB bootloader"]
-    R --> P["&lt;board&gt;-ubi-preloader.bin<br/>XMODEM 第一段"]
-    R --> F["&lt;board&gt;-ubi-bl31-uboot.fip<br/>XMODEM 第二段 / Web Recovery"]
-    R --> S["&lt;board&gt;-sha256sums.txt<br/>校验所有产物"]
-    R --> U["u-boot-raw.bin<br/>仅调试"]
+    R["GitHub Release / workflow artifact<br/>每板一份 &lt;board&gt;-YYYY-M-D-&lt;commit&gt;- 命名的产物集"] --> M["&lt;board&gt;-YYYY-M-D-&lt;commit&gt;-mtd0-signed.bin<br/>完整 2 MiB bootloader"]
+    R --> F["&lt;board&gt;-YYYY-M-D-&lt;commit&gt;-fip-signed.bin<br/>位于 mtd0 的 0x800 偏移"]
+    R --> P["&lt;board&gt;-YYYY-M-D-&lt;commit&gt;-ubi-preloader.bin<br/>XMODEM 第一段"]
+    R --> FIP["&lt;board&gt;-YYYY-M-D-&lt;commit&gt;-ubi-bl31-uboot.fip<br/>XMODEM 第二段 / Web Recovery"]
+    R --> B2["&lt;board&gt;-YYYY-M-D-&lt;commit&gt;-bootext-bl2.bin<br/>应急 BootROM 加载头"]
+    R --> L31["&lt;board&gt;-YYYY-M-D-&lt;commit&gt;-bl31.bin<br/>源码 BL31 (调试)"]
+    R --> U["&lt;board&gt;-YYYY-M-D-&lt;commit&gt;-u-boot-raw.bin<br/>裸 U-Boot/BL33 (调试)"]
+    R --> S["&lt;board&gt;-YYYY-M-D-&lt;commit&gt;-sha256sums.txt<br/>校验所有产物"]
+    R --> I["&lt;board&gt;-YYYY-M-D-&lt;commit&gt;-build-info.txt<br/>commit / 日期 / 镜像边界"]
 
     M --> T["TTL/TFTP 写入<br/>flash erase/write 0x200000"]
     P --> X["X 模式救砖"]
-    F --> X
+    FIP --> X
+    FIP --> W["Web Recovery 重建 UBI"]
+    S --> V["sha256sum 校验全部产物"]
+    I --> V
 
     classDef root fill:#0f172a,stroke:#334155,color:#ffffff;
     classDef art fill:#e0f2fe,stroke:#0284c7,color:#0f172a;
     classDef use fill:#dcfce7,stroke:#16a34a,color:#0f172a;
 
     class R root;
-    class M,P,F,S,U art;
-    class T,X use;
+    class M,F,P,FIP,B2,L31,U,S,I art;
+    class T,X,W,V use;
 ```
+
+所有产物文件名遵循 `<board>-YYYY-M-D-<commit>-<suffix>` 规范：
+
+- `<board>` ∈ {`xg2010g`, `xr1710g`}
+- `YYYY-M-D` 是触发 release 的 UTC+8 当日日期，月份和日子不带前导 0，与
+  `date +%Y-%-m-%-d` 的输出一致（例如 `2026-9-6`）
+- `<commit>` 是触发该次 workflow 的 commit 短哈希（前 12 位 hex），与
+  `git rev-parse --short=12` 一致
+
+举例：
+
+- `xg2010g-2026-9-6-723f7d9142e8-mtd0-signed.bin`
+- `xr1710g-2026-9-6-723f7d9142e8-sha256sums.txt`
 
 其中 `<board>` 为 `xg2010g`（Brightspeed Gemtek XG2010G）或 `xr1710g`（Brightspeed Gemtek XR1710G），
 请按自己的设备选择对应前缀的文件，两板镜像不可互换刷写。
@@ -310,6 +330,7 @@ flowchart TD
 | `<board>-...-fip-signed.bin` | signed FIP 本体，位于完整 mtd0 镜像的 `0x800` 偏移 |
 | `<board>-...-ubi-preloader.bin` | 包含 BL2 和 `tb-fw-cert` 的 signed FIP，用于 X 模式第一段 XMODEM |
 | `<board>-...-ubi-bl31-uboot.fip` | BL31 + U-Boot/BL33 FIP，用于 X 模式第二段 XMODEM 和 Web Recovery |
+| `<board>-...-bootext-bl2.bin` | BootROM X 模式应急垫片（`mtd0-prefix.bin` + 本仓库编译的 BL2，**未真机验证**，仅作备用） |
 | `<board>-...-bl31.bin` | 源码构建的 BL31 Airoha LZMA 固件，便于核对和离线调试 |
 | `<board>-...-u-boot-raw.bin` | 裸 U-Boot/BL33，仅供调试分析 |
 | `<board>-...-sha256sums.txt` | 该板所有产物 SHA256 |

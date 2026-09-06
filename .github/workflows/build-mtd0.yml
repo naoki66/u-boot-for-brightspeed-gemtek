@@ -705,11 +705,11 @@ jobs:
             echo "Raw BL31: ${bl31_name}"
             echo "Certificate chain: BL2 tb-fw, BL31 soc-fw, U-Boot BL33 nt-fw"
             echo "Certificate files: generated during signing, not uploaded"
-          } > "build-output/${board}-build-info.txt"
+          } > "build-output/${board}-${RELEASE_DATE}-${COMMIT_SHORT}-build-info.txt"
 
           sums_file=$(mktemp)
           (cd build-output && find . -maxdepth 1 -type f ! -name '*sha256sums*' -print0 | sort -z | xargs -0 sha256sum) > "$sums_file"
-          mv "$sums_file" "build-output/${board}-sha256sums.txt"
+          mv "$sums_file" "build-output/${board}-${RELEASE_DATE}-${COMMIT_SHORT}-sha256sums.txt"
 
           {
             echo "artifact_name=${artifact_name}"
