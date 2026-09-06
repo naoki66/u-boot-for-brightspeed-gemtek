@@ -1,4 +1,4 @@
-name: Build signed Brightspeed Gemtek mtd0
+name: Build signed mtd0 bootloader 
 
 on:
   push:
@@ -545,6 +545,44 @@ jobs:
           rm -f out/recovery-bl33-check.bin
           check_fip_size out/ubi-bl31-uboot.fip "$((BL23_FIP_MAX_SIZE))"
 
+          # 应急 bootext 垫片：给 BL2 加 BootROM XMODEM 加载头，格式对照原厂
+          # bootext.ram（magic 0xAA640001/0x12345678 + BL2 UUID + 载荷偏移/大小，
+          # 其余补零；0x38 校验区原厂非零，但 ImmortalWrt 为零可用，这里取零）。
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          HEADER_SIZE = 0x400
+          MAGIC0 = 0xAA640001
+          MAGIC1 = 0x12345678
+          BL2_UUID = bytes.fromhex("5ff9ec0b4d223e4da544c39d81c73f0a")
+          reset_vector = bytes.fromhex("0090a0e101a0a0e102b0a0e103c0a0e1")
+
+          bl2 = Path("signing/bl2.bin").read_bytes()
+          if bl2[:16] != reset_vector:
+              raise SystemExit(
+                  "unexpected BL2 entry code, expected AArch32 reset vector:\n"
+                  f"  got  {bl2[:16].hex()}\n  want {reset_vector.hex()}"
+              )
+          total = HEADER_SIZE + len(bl2)
+          if total > 0x1FC00:
+              raise SystemExit(
+                  f"headered BL2 too large: {total} > 0x1FC00 (vendor bootext.ram size)"
+              )
+
+          header = bytearray(HEADER_SIZE)
+          header[0:4] = MAGIC0.to_bytes(4, "little")
+          header[4:8] = MAGIC1.to_bytes(4, "little")
+          header[0x10:0x20] = BL2_UUID
+          header[0x20:0x24] = HEADER_SIZE.to_bytes(4, "little")
+          header[0x28:0x2C] = len(bl2).to_bytes(4, "little")
+          out = Path("out/bootext-bl2.bin")
+          out.write_bytes(bytes(header) + bl2)
+          print(f"bootext-bl2 bytes: {total}")
+          print(f"bootext-bl2 sha256: {hashlib.sha256(out.read_bytes()).hexdigest()}")
+          PY
+          test -s out/bootext-bl2.bin
+
       - name: Compose 2 MiB mtd0 image
         if: ${{ steps.signing.outputs.ready == 'true' }}
         env:
@@ -612,6 +650,7 @@ jobs:
           fip_name="${board}-${RELEASE_DATE}-${COMMIT_SHORT}-fip-signed.bin"
           preloader_name="${board}-${RELEASE_DATE}-${COMMIT_SHORT}-ubi-preloader.bin"
           recovery_fip_name="${board}-${RELEASE_DATE}-${COMMIT_SHORT}-ubi-bl31-uboot.fip"
+          bootext_name="${board}-${RELEASE_DATE}-${COMMIT_SHORT}-bootext-bl2.bin"
           bl31_name="${board}-${RELEASE_DATE}-${COMMIT_SHORT}-bl31.bin"
           uboot_raw_name="${board}-${RELEASE_DATE}-${COMMIT_SHORT}-u-boot-raw.bin"
           mkdir -p build-output
@@ -620,6 +659,7 @@ jobs:
           test -s "out/fip-${board}-signed.bin"
           test -s out/ubi-preloader.bin
           test -s out/ubi-bl31-uboot.fip
+          test -s out/bootext-bl2.bin
           test -s signing/bl2.bin
           test -s signing/bl31.bin
           test -s u-boot.bin
@@ -633,6 +673,7 @@ jobs:
           cp out/ubi-preloader.bin "build-output/${preloader_name}"
           cp signing/bl31.bin "build-output/${bl31_name}"
           cp out/ubi-bl31-uboot.fip "build-output/${recovery_fip_name}"
+          cp out/bootext-bl2.bin "build-output/${bootext_name}"
           cp out/fip-info.txt "build-output/${board}-fip-info.txt"
           cp out/ubi-preloader-fip-info.txt "build-output/${board}-ubi-preloader-fip-info.txt"
           cp out/ubi-bl31-uboot-fip-info.txt "build-output/${board}-ubi-bl31-uboot-fip-info.txt"
@@ -660,6 +701,7 @@ jobs:
             echo "FIP image: ${fip_name}"
             echo "Recovery BL2/preloader signed FIP: ${preloader_name}"
             echo "Recovery BL31+U-Boot FIP: ${recovery_fip_name}"
+            echo "BootROM XMODEM first-stage BL2 (bootext fallback): ${bootext_name}"
             echo "Raw BL31: ${bl31_name}"
             echo "Certificate chain: BL2 tb-fw, BL31 soc-fw, U-Boot BL33 nt-fw"
             echo "Certificate files: generated during signing, not uploaded"
@@ -718,7 +760,7 @@ jobs:
 
           mapfile -t BOARDS < <(jq -r '.[]' <<<"$BOARDS_JSON")
           for board in "${BOARDS[@]}"; do
-            for suffix in mtd0-signed.bin fip-signed.bin ubi-preloader.bin ubi-bl31-uboot.fip bl31.bin u-boot-raw.bin sha256sums.txt build-info.txt; do
+            for suffix in mtd0-signed.bin fip-signed.bin ubi-preloader.bin ubi-bl31-uboot.fip bootext-bl2.bin bl31.bin u-boot-raw.bin sha256sums.txt build-info.txt; do
               file="release-output/${board}-${RELEASE_DATE}-${COMMIT}-${suffix}"
               if [ ! -s "$file" ]; then
                 echo "Release asset not found: $file" >&2
@@ -742,7 +784,7 @@ jobs:
           mapfile -t BOARDS < <(jq -r '.[]' <<<"$BOARDS_JSON")
           paths=()
           for board in "${BOARDS[@]}"; do
-            for suffix in mtd0-signed.bin fip-signed.bin ubi-preloader.bin ubi-bl31-uboot.fip bl31.bin u-boot-raw.bin sha256sums.txt build-info.txt; do
+            for suffix in mtd0-signed.bin fip-signed.bin ubi-preloader.bin ubi-bl31-uboot.fip bootext-bl2.bin bl31.bin u-boot-raw.bin sha256sums.txt build-info.txt; do
               paths+=("release-output/${board}-${RELEASE_DATE}-${COMMIT}-${suffix}")
             done
           done
@@ -774,6 +816,7 @@ jobs:
           - \`<board>-${RELEASE_DATE}-${COMMIT}-fip-signed.bin\` - signed FIP only, placed at the configured mtd0 FIP offset.
           - \`<board>-${RELEASE_DATE}-${COMMIT}-ubi-preloader.bin\` - signed FIP containing the compiled BL2 and its content certificate for XMODEM recovery.
           - \`<board>-${RELEASE_DATE}-${COMMIT}-ubi-bl31-uboot.fip\` - BL31 + U-Boot FIP for the second XMODEM recovery transfer.
+          - \`<board>-${RELEASE_DATE}-${COMMIT}-bootext-bl2.bin\` - BootROM XMODEM first-stage BL2 with the Airoha load header (emergency fallback for the vendor bootext.ram; not device-verified, prefer the vendor file).
           - \`<board>-${RELEASE_DATE}-${COMMIT}-bl31.bin\` - compiled BL31 compressed with the Airoha LZMA container.
           - \`<board>-${RELEASE_DATE}-${COMMIT}-u-boot-raw.bin\` - raw U-Boot/BL33 from this build.
           - \`<board>-${RELEASE_DATE}-${COMMIT}-sha256sums.txt\` - SHA256 checksums for this board's artifacts.

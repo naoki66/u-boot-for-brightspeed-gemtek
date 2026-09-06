@@ -77,9 +77,8 @@
 - [✅ 正常引导与回退](#-正常引导与回退)
 - [🧯 常见问题排查](#-常见问题排查)
 
-**构建与法律**
+**开源**
 
-- [🔧 本地构建](#-本地构建)
 - [📄 GPL 说明](#-gpl-说明)
 
 ---
@@ -87,18 +86,18 @@
 ## 📌 项目定位
 
 本仓库基于当前主线 U-Boot，加入 Brightspeed Gemtek XG2010G 与 XR1710G 的
-Airoha AN7581 类平台板级支持（`xg2010g_defconfig` / `xr1710g_defconfig`），
+Airoha AN7581 类平台支持（`xg2010g_defconfig` / `xr1710g_defconfig`），
 用于替换原厂被限制功能的 `mtd0 bootloader`。
 刷写 bootloader 存在变砖风险，请自行评估并承担操作后果。
 
 | 项目 | 当前约束 |
 | --- | --- |
-| 设备 | Brightspeed Gemtek XG2010G · XR1710G（两板共用同一启动链与分区布局） |
+| 设备 | Brightspeed Gemtek XG2010G · XR1710G（其他设备未验证） |
 | 平台 | Airoha AN7581/AN7583 类启动链 |
 | bootloader 分区 | `0x00000000-0x00200000`，固定 2 MiB |
 | 工具版本 | TF-A tooling `v2.13.0`；Airoha TF-A 基于 `v2.10` 与固定 overlay commit |
 
-XG2010G 的 `mtd0` 通常不是裸 `u-boot.bin`，而是一个从 BL2 开始验证的完整
+Brightspeed Gemtek设备的 `mtd0` 通常不是裸 `u-boot.bin`，而是一个从 BL2 开始验证的完整
 启动包/FIP，包含 BL2、BL31、U-Boot/BL33 和证书材料。本仓库本地编译出的
 `u-boot.bin` 只是 BL33 候选文件；正式刷机请使用 Actions/Releases 生成的
 signed mtd0/FIP。
@@ -109,11 +108,11 @@ signed mtd0/FIP。
 
 | 图标 | 特性 | 说明 |
 | --- | --- | --- |
-| 🧩 | 主线 U-Boot | 基于 U-Boot `2026.10-rc3` 主线，新增 XG2010G/XR1710G 板级 DTS 与 `xg2010g_defconfig`/`xr1710g_defconfig` |
-| 🔐 | 强制 Trusted Boot | 设备只接受 signed 镜像，自行编译须自行完成签名 |
-| 🧱 | mtd0 边界硬校验 | workflow 强制 mtd0 = `0x200000`（2 MiB），越界直接构建失败 |
+| 🧩 | 主线 U-Boot | 基于 U-Boot `2026.10-rc3` 主线，新增 XG2010G/XR1710G 支持|
+| 🔐 | 强制 Trusted Boot | 设备只接受 signed 镜像，编译的成果须完成签名 |
+| 🧱 | mtd0 边界硬校验 | 强制适配原厂分区 mtd0 = `0x200000`（2 MiB），越界直接构建失败 |
 | 🧬 | 源码构建 BL2/BL31 | 固定 Airoha TF-A、Mbed TLS、Arm GNU Toolchain 与 LZMA 版本 |
-| 🔧 | 固定签名工具链 | TF-A tooling 锁定 `v2.13.0`，用于生成 FIP 与证书 |
+| 🔧 | 固定签名工具链 | TF-A tooling 锁定 `v2.10`，用于生成 FIP 与证书 |
 | 🛟 | 双救砖路径 | BootROM X 模式 XMODEM 两段传输 + Web Recovery 重建 UBI |
 | 📦 | 完整交付物 | 每次构建附带 `sha256sums.txt` 与 `build-info.txt`（commit、日期、边界） |
 
@@ -122,7 +121,7 @@ signed mtd0/FIP。
 ## 🚀 快速开始（TL;DR）
 
 > [!TIP]
-> 先判断你处在哪种情况，再选择对应文件。**只有 `mtd0-signed.bin` 可以写 bootloader 分区。**
+> 先判断你处在哪种情况，再选择对应文件。**只有 `mtd0-signed.bin` 可以写 bootloader 完整分区。**
 
 | 你的情况 | 使用的产物 | 操作要点 |
 | --- | --- | --- |
@@ -149,7 +148,7 @@ signed mtd0/FIP。
 
 > [!WARNING]
 > `mtd0` 的正确长度是 `0x200000`，即 2 MiB。使用其他擦写长度会越过
-> `uenv`、`dsd`，破坏系统区域。
+> `uenv`、`dsd`，破坏系统区域，导致系统异常，无mac、校准文件等。
 
 > [!CAUTION]
 > 刷写 bootloader 前必须保存完整原厂备份，并确认 NAND 型号、页大小、
@@ -312,7 +311,7 @@ flowchart TD
 | `<board>-...-ubi-preloader.bin` | 包含 BL2 和 `tb-fw-cert` 的 signed FIP，用于 X 模式第一段 XMODEM |
 | `<board>-...-ubi-bl31-uboot.fip` | BL31 + U-Boot/BL33 FIP，用于 X 模式第二段 XMODEM 和 Web Recovery |
 | `<board>-...-bl31.bin` | 源码构建的 BL31 Airoha LZMA 固件，便于核对和离线调试 |
-| `<board>-...-u-boot-raw.bin` | 裸 U-Boot/BL33，仅供调试 |
+| `<board>-...-u-boot-raw.bin` | 裸 U-Boot/BL33，仅供调试分析 |
 | `<board>-...-sha256sums.txt` | 该板所有产物 SHA256 |
 | `<board>-...-build-info.txt` | 该板构建 commit、日期、签名状态和镜像边界 |
 
@@ -327,7 +326,7 @@ CertUtil -hashfile <board>-...-mtd0-signed.bin SHA256
 ```
 
 > [!IMPORTANT]
-> 只有 `<board>-...-mtd0-signed.bin` 是完整 2 MiB `mtd0` 镜像。其它裸文件或
+> 只有 `<board>-...-mtd0-signed.bin` 是完整 2 MiB `mtd0` 签名镜像。其它裸文件或
 > FIP 文件用于救砖、调试或 Web Recovery，不要当作完整 `mtd0` 直接写入
 > `0x00000000`。
 
@@ -397,19 +396,23 @@ sequenceDiagram
     W-->>U: Flash sysupgrade + BL2 + U-Boot, rebuild UBI
 ```
 
-### 首次 bootext.ram
+### 关于 bootext.ram（可选，通常不需要）
 
-首次使用救砖链时，可能需要先加载一次 `bootext.ram`：
+救砖链**不需要** `bootext.ram`：X 模式下直接发送 `ubi-preloader.bin` 即可（见下节）。
+
+仅当设备无法直接接收 `ubi-preloader.bin` 时，才先加载一次 `bootext.ram` 作为应急垫片：
 
 1. 断电。
 2. 按住 <kbd>RESET</kbd> 键，同时通电启动。
 3. 终端显示 `CCCC` 时表示设备已进入 X 模式。
 4. 打开终端菜单：文件 -> 传输 -> XMODEM -> 发送。
-5. 选择 `bootext.ram`，等待传输完成。之后通常不再需要重复加载该文件。
+5. 选择 `bootext.ram`，等待传输完成后，再按「正式救砖/刷机」流程继续。
 
 > [!NOTE]
 > `bootext.ram` 属于平台救援链文件，不由本仓库的 U-Boot 编译生成；需要
-> 保留已验证可用的原厂/平台版本。
+> 保留已验证可用的原厂/平台版本。CI 产物附带自编译的
+> `<board>-...-bootext-bl2.bin`（BootROM 加载头 + 本仓库编译的 BL2）作应急
+> 备份，但未经过真机验证，优先使用已验证的原厂版本。
 
 ### 正式救砖/刷机
 
@@ -465,14 +468,14 @@ setenv boot_production 'run ubi_read_production && bootm ${loadaddr}#${bootconf}
 setenv ubi_read_production 'ubi read ${loadaddr} fit'
 setenv bootconf config-1
 setenv bootcmd 'run boot_ubi || http_recovery'
-setenv bootargs 'sdram_conf=0x00108893 vendor_name=ECONET Technologies Corp. product_name=xPON ONU ubi.mtd=ubi snmp_sysobjid=1.2.3.4.5 country_code=ff ether_gpio=0c power_gpio=1515 dsl_gpio=0b internet_gpio=02 multi_upgrade_gpio=0b020400000000000000000000000000 onu_type=71 qdma_init=69bb console=ttyS0,115200n8 earlycon bootflag=0 serdes_sel=0 serdes_pon=000 serdes_ethernet=411 serdes_wifi1=005 serdes_wifi2=413 serdes_usb1=111 serdes_usb2=000 ubi.block=0,fit root=/dev/fit0 rootwait ramdisk_size=65536 rdinit=/sbin/init'
+setenv bootargs 'sdram_conf=0x00108893 vendor_name=ECONET Technologies Corp. product_name=xPON ONU ubi.mtd=ubi snmp_sysobjid=1.2.3.4.5 country_code=ff ether_gpio=0c power_gpio=1515 dsl_gpio=0b internet_gpio=02 multi_upgrade_gpio=0b020400000000000000000000000000 onu_type=62 qdma_init=69bb console=ttyS0,115200n8 earlycon bootflag=0 serdes_sel=0 serdes_pon=000 serdes_ethernet=411 serdes_wifi1=005 serdes_wifi2=413 serdes_usb1=111 serdes_usb2=000 ubi.block=0,fit root=/dev/fit0 rootwait ramdisk_size=65536 rdinit=/sbin/init'
 saveenv
 reset
 ```
 
 迁移说明：
 
-- `ubi.mtd=system` 应改为 `ubi.mtd=ubi`，匹配本项目 DTS 中的新 UBI 分区名。
+- `ubi.mtd=system` 应改为 `ubi.mtd=ubi`，匹配本项目 DTS 中的新固件 UBI 分区名。
 - `root=/dev/mtdblock4 ro` 是原厂旧 `rootfs` 分区路径；新 UBI 布局下不应写入。
   默认启动必须从 `fit` 卷读取 FIT，root 参数由 FIT/系统镜像布局决定。
 - 新 U-Boot 会在检测到上述旧参数时自动替换为项目默认 bootargs；其他自定义
@@ -501,7 +504,7 @@ PHY 初始化日志校核。参数名中的下划线是名称的一部分；文�
 
 | 参数 | 当前值 | 说明 |
 | --- | --- | --- |
-| `sdram_conf` | `0x00108893` | Airoha/ECONET 平台的 SDRAM 配置标识。DDR 的实际早期初始化由匹配硬件的 BL2 完成；当前 SDK 没有公开该值的完整位定义，应保留原厂值。 |
+| `sdram_conf` | `0x00108893` | Airoha 平台的 SDRAM 配置标识。DDR 的实际早期初始化由匹配硬件的 BL2 完成；当前 SDK 没有公开该值的完整位定义，目前保留原厂值。 |
 | `vendor_name` | `ECONET Technologies Corp.` | 厂商名称，供厂商系统接口或用户态组件识别，不决定 U-Boot/FIT 启动。 |
 | `product_name` | `xPON ONU` | 通用产品类别名称。 |
 | `snmp_sysobjid` | `1.2.3.4.5` | SNMP `sysObjectID`；当前值是原厂通用占位 OID，不影响启动。 |
@@ -545,7 +548,7 @@ Linux 命令行解析器可能把它们分别截断为 `vendor_name=ECONET` 和
 `multi_upgrade_gpio` 的完整打包格式。它们也不等同于板级 DTS 中的 Linux
 `gpio-leds` 编号，未取得对应厂商解码实现前不应自行改写。
 
-### ONU 类型：`onu_type=71`
+### ONU 类型：`onu_type=62`
 
 `onu_type` 是一个按位打包的十六进制字节，不是单一的模式编号。SDK 使用
 `ONUTYPE_MASK=0x03`、`COMBOPON_MASK=0x04`、`BBF247_MASK=0x08` 和
@@ -590,6 +593,7 @@ onu_type = (PON_MODE << 4) | (BBF247_BIT << 3) | (COMBO_BIT << 2) | ONU_TYPE
 | GPON + SFU | `0x11`（命令行可写 `11`） |
 | EPON + SFU | `0x21`（命令行可写 `21`） |
 | XGPON + SFU | `0x61`（命令行可写 `61`） |
+| XGPON + HGU | `0x62`（命令行可写 `62`） |
 | XGSPON + SFU | `0x71`（命令行可写 `71`） |
 | XGSPON + HGU | `0x72`（命令行可写 `72`） |
 
