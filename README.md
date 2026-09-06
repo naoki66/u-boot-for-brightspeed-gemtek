@@ -139,7 +139,7 @@ signed mtd0/FIP。
 | signed FIP 在 mtd0 内偏移 | `0x800` |
 | U-Boot 加载地址 | `0x81800000` |
 | TTL/TFTP 网段 | U-Boot `192.168.0.1`，电脑 `192.168.0.205/24`（网线接设备 1G 口） |
-| Web Recovery | 无痕模式打开 `http://192.168.1.1/uboot.html`，系统固件上传会自动重建 UBI |
+| Web Recovery | 无痕模式打开 `http://192.168.1.1/`，系统固件上传会自动重建 UBI |
 | 救砖文件 | `ubi-preloader.bin` + `ubi-bl31-uboot.fip`（XMODEM 两段） |
 
 <p align="right"><a href="#top"><b>↑ 返回顶部</b></a></p>
@@ -391,7 +391,7 @@ sequenceDiagram
     B-->>T: Press x to load BL31 + U-Boot FIP
     U->>T: Send ubi-bl31-uboot.fip
     U->>B: Hold RESET before 100%, release after flowing LEDs
-    U->>W: Open http://192.168.1.1/uboot.html
+    U->>W: Open http://192.168.1.1/ (incognito)
     W-->>U: Flash sysupgrade + BL2 + U-Boot, rebuild UBI
 ```
 
@@ -421,12 +421,22 @@ sequenceDiagram
 8. 再次打开 XMODEM 发送。
 9. 发送 `xg2010g-...-ubi-bl31-uboot.fip` 或 `ubi-bl31-uboot.fip`。
 10. 第二段 XMODEM 进度到 100% 前按住 <kbd>RESET</kbd>，等设备灯进入流水式闪烁后再松开。
-11. 浏览器使用无痕模式访问 `http://192.168.1.1/uboot.html`。
+11. 浏览器使用**无痕模式**访问 `http://192.168.1.1/`（网线可接设备任一网口，含 WAN 口）。
 12. 选择系统镜像 `ubi-squashfs-sysupgrade.itb`。
 13. `BL2` 选择 `xg2010g-...-ubi-preloader.bin` 或 `ubi-preloader.bin`。
 14. `U-Boot` 选择 `xg2010g-...-ubi-bl31-uboot.fip` 或 `ubi-bl31-uboot.fip`。
 15. 系统固件上传会自动擦除并重建完整 `ubi` 布局，无需额外勾选。
 16. 等待数分钟完成刷写，之后务必断电重启设备。
+
+> [!CAUTION]
+> 必须使用**无痕（隐私）窗口**打开 `http://192.168.1.1/`。设备此前运行 OpenWrt 时，
+> 同一地址曾由 LuCI 提供 301 跳转到登录页 `http://192.168.1.1/cgi-bin/luci/`，普通
+> 浏览器窗口会命中本地缓存的跳转记录，直接打开 OpenWrt 登录页而非 Recovery 页。
+> 无痕窗口不带缓存和 Cookie，可避开该问题；若仍出现 LuCI 页面，按 `Ctrl+F5` 强制
+> 刷新，或换用其他浏览器验证。
+
+> [!NOTE]
+> 恢复页在**所有网口**（含 WAN 口）同时接受 DHCP 与 HTTP，设备地址统一为 `192.168.1.1/24`，PC 从任一口都能拿到 `192.168.1.2` 并打开页面；建议只插一根网线，多口同时插线时上传链路可能不稳定。恢复页运行期间，面板状态灯 sts 红/绿/蓝/白（GPIO 43/44/45/33，对应原厂 FDT 0x0f 控制器 11/12/13/1，低有效）做呼吸跑马灯，LAN4 口绿/黄灯继续指示链路状态。启动日志应出现 `Recovery status LEDs: gpio43(L) gpio44(L) gpio45(L) gpio33(L) (software PWM)`；若某盏灯明暗相反，把该灯的 `GPIO_ACTIVE_LOW` 改为 `GPIO_ACTIVE_HIGH` 即可。
 
 <p align="right"><a href="#top"><b>↑ 返回顶部</b></a></p>
 
@@ -689,6 +699,7 @@ reboot
 | `filesize` 不是 `0x200000` 或 CRC 与发布值不符 | 文件下载不完整或拿错产物 | 用 Release 内 `sha256sums.txt` 校验，重新下载 `mtd0-signed.bin` |
 | `project UBI ... has no 'fit' volume` | NAND 仍是原厂 UBI 布局，还没有刷入项目系统镜像 | 先执行 `http_recovery`，上传 `ubi-squashfs-sysupgrade.itb`，由 Recovery 重建带 `fit` 卷的 `ubi` 分区 |
 | 第二段 XMODEM 后进不了 Web Recovery | <kbd>RESET</kbd> 时序不对 | 传输 100% 前按住 <kbd>RESET</kbd>，等流水灯亮起再松开，无痕模式访问 |
+| 打开 `http://192.168.1.1/` 却显示 OpenWrt LuCI 登录页 | 普通窗口命中浏览器缓存的旧 301 跳转（原 `uboot.html` 入口也已移除，`/` 即恢复页） | 改用无痕模式，或按 `Ctrl+F5` 强制刷新 |
 | UBI 启动失败 | UBI 未格式化、缺少 `fit` 卷或 FIT 无法启动 | 等待自动进入 Web Recovery，上传完整项目系统镜像，Recovery 自动重建 UBI |
 
 <p align="right"><a href="#top"><b>↑ 返回顶部</b></a></p>

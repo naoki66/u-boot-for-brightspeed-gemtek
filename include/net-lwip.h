@@ -48,6 +48,7 @@ void net_lwip_set_recovery_dhcp_hook(net_lwip_udp_recv_fn recv, void *arg);
 void net_lwip_set_recovery_poll_hook(net_lwip_poll_fn poll, void *arg);
 struct netif *net_lwip_new_netif(struct udevice *udev);
 struct netif *net_lwip_new_netif_noip(struct udevice *udev);
+struct netif *net_lwip_new_netif_multi(struct udevice *udev);
 void net_lwip_remove_netif(struct netif *netif);
 struct netif *net_lwip_get_netif(void);
 int net_lwip_rx(struct udevice *udev, struct netif *netif);

@@ -362,7 +362,8 @@ void net_lwip_eth_stop(void)
 	eth_halt();
 }
 
-static struct netif *new_netif(struct udevice *udev, bool with_ip)
+static struct netif *new_netif_core(struct udevice *udev, bool with_ip,
+				    bool shared)
 {
 	unsigned char enetaddr[ARP_HLEN];
 	char hwstr[MAC_ADDR_STRLEN];
@@ -378,7 +379,8 @@ static struct netif *new_netif(struct udevice *udev, bool with_ip)
 		return NULL;
 	}
 
-	netif_remove(net_lwip_get_netif());
+	if (!shared)
+		netif_remove(net_lwip_get_netif());
 
 	ip4_addr_set_zero(&ip);
 	ip4_addr_set_zero(&mask);
@@ -416,10 +418,27 @@ static struct netif *new_netif(struct udevice *udev, bool with_ip)
 
 	netif_set_up(netif);
 	netif_set_link_up(netif);
-	/* Routing: use this interface to reach the default gateway */
-	netif_set_default(netif);
+	if (!shared)
+		/* Routing: use this interface to reach the default gateway */
+		netif_set_default(netif);
 
 	return netif;
+}
+
+static struct netif *new_netif(struct udevice *udev, bool with_ip)
+{
+	return new_netif_core(udev, with_ip, false);
+}
+
+/*
+ * Create an additional netif without replacing previously created ones.
+ * Used by the recovery server so that every Ethernet port accepts DHCP
+ * and HTTP simultaneously. The caller owns the returned netif and must
+ * remove it with net_lwip_remove_netif().
+ */
+struct netif *net_lwip_new_netif_multi(struct udevice *udev)
+{
+	return new_netif_core(udev, true, true);
 }
 
 struct netif *net_lwip_new_netif(struct udevice *udev)

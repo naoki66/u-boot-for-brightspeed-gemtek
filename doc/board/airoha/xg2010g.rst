@@ -548,7 +548,11 @@ X 模式加载临时引导。该流程需要 TTL 串口和支持 XMODEM 的终�
    发送 ``...-ubi-bl31-uboot.fip`` 或 ``ubi-bl31-uboot.fip``。
 5. 关键时序：第二段 XMODEM 进度到 100% 前提前按住 ``RESET``，等待设备灯
    完成闪烁并进入流水式闪烁后再松开。
-6. 浏览器使用无痕模式访问 ``http://192.168.1.1/uboot.html``。
+6. 浏览器使用无痕模式访问 ``http://192.168.1.1/``。必须用无痕（隐私）窗口：
+   设备此前运行 OpenWrt 时，同一地址曾由 LuCI 提供 301 跳转到登录页
+   ``http://192.168.1.1/cgi-bin/luci/``，普通窗口可能命中浏览器缓存的跳转记录，
+   打开的是 OpenWrt 登录页而非 Recovery 页；若仍出现 LuCI 页面，按 ``Ctrl+F5``
+   强制刷新。
 7. 选择 ``ubi-squashfs-sysupgrade.itb``；``BL2`` 选择
    ``...-ubi-preloader.bin``，``U-Boot`` 选择 ``...-ubi-bl31-uboot.fip``。
 8. 系统固件上传会自动擦除并重建完整 UBI，等待数分钟完成刷写。

@@ -948,7 +948,7 @@ int board_late_init(void)
 
 	printf("XG2010G release %s - %s\n",
 	       XG2010G_RELEASE_VERSION, XG2010G_RELEASE_CREDIT);
-	printf("XG2010G HTTP recovery: type 'http_recovery', then open http://192.168.1.1/uboot.html (PC 192.168.1.2/24)\n");
+	printf("XG2010G HTTP recovery: type 'http_recovery', then open http://192.168.1.1/ in incognito mode (PC 192.168.1.2/24)\n");
 
 	/* Read only the one-shot mtd1/uenv flag; never save mtd0 env. */
 	if (xg2010g_is_compatible()) {

@@ -17,6 +17,38 @@
 	recovery-green-led-gpios = <&en7581_pinctrl 46 GPIO_ACTIVE_LOW>;
 	recovery-yellow-led-gpios = <&en7581_pinctrl 42 GPIO_ACTIVE_LOW>;
 
+	/*
+	 * Panel status LEDs used by the web recovery server for the
+	 * breathing/sweep effect (see net/lwip/httpd_recovery.c).
+	 * Mapping from the stock FDT gpio@1fbf0270 (phandle 0x0f) pins
+	 * sts_red/sts_green/sts_blue/sts_white = 11/12/13/1, all
+	 * active-low, verified against the OpenWrt en7581_pinctrl
+	 * linear numbering (+32 on the 0x0f controller).
+	 */
+	leds {
+		compatible = "gpio-leds";
+
+		led-sts-red {
+			function = "status";
+			gpios = <&en7581_pinctrl 43 GPIO_ACTIVE_LOW>;
+		};
+
+		led-sts-green {
+			function = "status";
+			gpios = <&en7581_pinctrl 44 GPIO_ACTIVE_LOW>;
+		};
+
+		led-sts-blue {
+			function = "status";
+			gpios = <&en7581_pinctrl 45 GPIO_ACTIVE_LOW>;
+		};
+
+		led-sts-white {
+			function = "status";
+			gpios = <&en7581_pinctrl 33 GPIO_ACTIVE_LOW>;
+		};
+	};
+
 	aliases {
 		serial0 = &uart1;
 	};

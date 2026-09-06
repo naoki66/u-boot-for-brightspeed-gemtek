@@ -57,11 +57,6 @@ const char *xg2010g_detect_ubi_version(void);
 const char *an7581_release_version(void);
 const char *an7581_release_credit(void);
 
-__weak unsigned long airoha_recovery_get_lan_activity_ms(void)
-{
-	return 0;
-}
-
 __weak bool airoha_recovery_dhcp_rx_allowed(struct udevice *dev)
 {
 	(void)dev;
@@ -70,11 +65,6 @@ __weak bool airoha_recovery_dhcp_rx_allowed(struct udevice *dev)
 }
 
 __weak void airoha_recovery_restart_links(struct udevice *dev)
-{
-	(void)dev;
-}
-
-__weak void airoha_recovery_poll_link(struct udevice *dev)
 {
 	(void)dev;
 }
@@ -98,7 +88,8 @@ __weak void airoha_recovery_poll_link(struct udevice *dev)
 #define RECOVERY_STATIC_IPADDR           "192.168.1.1"
 #define RECOVERY_STATIC_NETMASK          "255.255.255.0"
 #define RECOVERY_STATIC_GATEWAY          "0.0.0.0"
-#define RECOVERY_DHCP_CLIENT_IPADDR      "192.168.1.2"
+/* One DHCP/HTTP endpoint per Ethernet device, 192.168.<seq+1>.1/24 each */
+#define RECOVERY_NETIF_MAX               4
 #define RECOVERY_DHCP_BROADCAST_IPADDR   "192.168.1.255"
 #define RECOVERY_DHCP_LEASE_SECS         86400U
 #define RECOVERY_DHCP_MAX_MSG_LEN        1500
@@ -318,6 +309,113 @@ struct recovery_dhcp_server {
 	ip4_addr_t broadcast;
 	ip4_addr_t dns;
 };
+
+/* Per-port recovery endpoint: one netif plus its DHCP server */
+struct recovery_net_ctx {
+	struct udevice *udev;
+	struct netif *netif;
+	struct recovery_dhcp_server dhcp;
+	ulong last_link_poll;
+};
+
+static struct recovery_net_ctx recovery_nets[RECOVERY_NETIF_MAX];
+static int recovery_net_count;
+/* Server owning the packet currently dispatched from net_lwip_rx() */
+static struct recovery_dhcp_server *recovery_rx_srv;
+
+/*
+ * Real PHY link state for the recovery ports (XG2010G wiring):
+ *   eth0/gdm4 -> FE MDIO PHY5   (RTL8261N, clause 45)
+ *   eth1/gdm1 -> FE MDIO PHY15  (EN8811H, clause 22)
+ *   eth2/gdm2 -> switch MDIO PHY12 (LAN4 behind the switch)
+ * Feeding netif_set_link_up/down() keeps lwIP's ip4_route() on the port
+ * that actually has a cable: with all netifs sharing 192.168.1.1/24,
+ * only the link-up netif is eligible for TCP reply routing. Ports
+ * without a known PHY mapping stay link-up. Read errors are ignored so
+ * a broken MDIO bus never takes a working port out of the routing pool.
+ */
+static struct udevice *recovery_port_mdio_dev(unsigned int seq)
+{
+	static struct udevice *fe_mdio;
+	static struct udevice *sw_mdio;
+	struct udevice **dev;
+	ofnode node;
+
+	if (seq == 0 || seq == 1)
+		dev = &fe_mdio;
+	else if (seq == 2)
+		dev = &sw_mdio;
+	else
+		return NULL;
+
+	if (!*dev) {
+		if (seq == 2)
+			node = ofnode_path("/soc/switch@1fb58000/mdio");
+		else
+			node = ofnode_path("/mdio-bus");
+		if (!ofnode_valid(node))
+			return NULL;
+		uclass_get_device_by_ofnode(UCLASS_MDIO, node, dev);
+	}
+
+	return *dev;
+}
+
+void airoha_recovery_poll_link(struct udevice *dev)
+{
+	struct recovery_net_ctx *net = NULL;
+	struct udevice *mdio_dev;
+	unsigned int seq;
+	int phy, bmsr, i;
+
+	if (!recovery_net_count)
+		return;
+
+	for (i = 0; i < recovery_net_count; i++) {
+		if (recovery_nets[i].udev == dev) {
+			net = &recovery_nets[i];
+			break;
+		}
+	}
+	if (!net)
+		return;
+
+	seq = (unsigned int)dev_seq(dev);
+	switch (seq) {
+	case 0:
+		phy = 5;
+		break;
+	case 1:
+		phy = 0xf;
+		break;
+	case 2:
+		phy = 12;
+		break;
+	default:
+		return;
+	}
+
+	if (get_timer(net->last_link_poll) < RECOVERY_LED_PHY_POLL_MS)
+		return;
+	net->last_link_poll = get_timer(0);
+
+	mdio_dev = recovery_port_mdio_dev(seq);
+	if (!mdio_dev)
+		return;
+
+	/* LSTATUS is latched low on link loss: read twice. */
+	bmsr = dm_mdio_read(mdio_dev, phy, MDIO_DEVAD_NONE, MII_BMSR);
+	if (bmsr < 0)
+		return;
+	bmsr = dm_mdio_read(mdio_dev, phy, MDIO_DEVAD_NONE, MII_BMSR);
+	if (bmsr < 0)
+		return;
+
+	if (bmsr & BMSR_LSTATUS)
+		netif_set_link_up(net->netif);
+	else
+		netif_set_link_down(net->netif);
+}
 
 /* XG2010G LAN4 is the sole switch-facing recovery LED pair (PHY12). */
 static const int recovery_led_phy_addrs[RECOVERY_LED_PORTS] = { 12 };
@@ -1179,6 +1277,13 @@ static void recovery_dhcp_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
 	if (!p)
 		return;
 
+	/* Broadcast DHCP arrives via the net-lwip dispatch hook (arg == NULL);
+	 * unicast renewals arrive through the per-pcb callback (arg == srv). */
+	if (!srv)
+		srv = recovery_rx_srv;
+	if (!srv)
+		goto out;
+
 	if (!airoha_recovery_dhcp_rx_allowed(srv->netif->state))
 		goto out;
 
@@ -1257,8 +1362,10 @@ static int recovery_dhcp_server_init(struct recovery_dhcp_server *srv,
 	if (ip4_addr_isany(&srv->router))
 		ip4_addr_copy(srv->router, srv->server_ip);
 
-	if (!ip4addr_aton(RECOVERY_DHCP_CLIENT_IPADDR, &srv->client_ip))
-		return -EINVAL;
+	/* Offer the first usable host address of the port's own subnet so
+	 * multi-port setups (192.168.<seq+1>.1/24 each) stay consistent.
+	 * lwIP stores ip4_addr_t in host order: host part 2 == x.x.x.2. */
+	srv->client_ip.addr = (srv->server_ip.addr & srv->netmask.addr) | 0x2;
 
 	if (ip4_addr_isany(&srv->netmask)) {
 		if (!ip4addr_aton(RECOVERY_DHCP_BROADCAST_IPADDR, &srv->broadcast))
@@ -1272,7 +1379,10 @@ static int recovery_dhcp_server_init(struct recovery_dhcp_server *srv,
 	if (!srv->pcb)
 		return -ENOMEM;
 
+	/* SOF_BROADCAST: offer/ack go to 255.255.255.255. SOF_REUSEADDR lets
+	 * one pcb per port bind the shared ANY:67 endpoint. */
 	ip_set_option(srv->pcb, SOF_BROADCAST);
+	ip_set_option(srv->pcb, SOF_REUSEADDR);
 
 	err = udp_bind(srv->pcb, IP4_ADDR_ANY, LWIP_IANA_PORT_DHCP_SERVER);
 	if (err != ERR_OK) {
@@ -3366,15 +3476,98 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 	return 0;
 }
 
+/*
+ * Bring up every Ethernet device so any port (LAN or WAN jack) accepts
+ * DHCP and HTTP during recovery. All netifs share 192.168.1.1/24; the
+ * per-port DHCP servers reply through their own netif, and TCP reply
+ * routing stays correct because airoha_recovery_poll_link() drives
+ * netif_set_link_up/down() from the real PHY link state, and lwIP's
+ * ip4_route_src() only picks link-up netifs. Each netif keeps the
+ * address configured via its per-sequence env vars when present.
+ */
+static int recovery_net_setup(void)
+{
+	struct udevice *dev;
+	int count;
+
+	count = 0;
+	for (dev = NULL; count < RECOVERY_NETIF_MAX;) {
+		struct recovery_net_ctx *net = &recovery_nets[count];
+		struct netif *netif;
+		char ipstr[IP4ADDR_STRLEN_MAX];
+
+		if (!dev) {
+			uclass_first_device(UCLASS_ETH, &dev);
+		} else {
+			uclass_next_device(&dev);
+		}
+		if (!dev)
+			break;
+
+		netif = net_lwip_new_netif_multi(dev);
+		if (!netif)
+			continue;
+
+		net->udev = dev;
+		net->netif = netif;
+		net->dhcp.netif = netif;
+
+		if (ip4_addr_isany(netif_ip4_addr(netif)) ||
+		    ip4_addr_isany(netif_ip4_netmask(netif))) {
+			ip4_addr_t ip, mask, gw;
+
+			ip4addr_aton(RECOVERY_STATIC_IPADDR, &ip);
+			ip4addr_aton(RECOVERY_STATIC_NETMASK, &mask);
+			ip4addr_aton(RECOVERY_STATIC_GATEWAY, &gw);
+			netif_set_addr(netif, &ip, &mask, &gw);
+			printf("Recovery netif %s configured statically: %s/%s\n",
+			       dev->name,
+			       ip4addr_ntoa_r(netif_ip4_addr(netif), ipstr,
+					      sizeof(ipstr)),
+			       RECOVERY_STATIC_NETMASK);
+		} else {
+			printf("Recovery netif %s: %s (env)\n", dev->name,
+			       ip4addr_ntoa_r(netif_ip4_addr(netif), ipstr,
+					      sizeof(ipstr)));
+		}
+
+		if (recovery_dhcp_server_init(&net->dhcp, netif))
+			printf("Failed to start recovery DHCP server on %s\n",
+			       dev->name);
+
+		if (!count)
+			netif_set_default(netif);
+		count++;
+	}
+
+	recovery_net_count = count;
+	return count;
+}
+
+static void recovery_net_teardown(void)
+{
+	int i;
+
+	for (i = 0; i < recovery_net_count; i++) {
+		recovery_dhcp_server_stop(&recovery_nets[i].dhcp);
+		if (recovery_nets[i].netif) {
+			etharp_cleanup_netif(recovery_nets[i].netif);
+			net_lwip_remove_netif(recovery_nets[i].netif);
+		}
+		recovery_nets[i].udev = NULL;
+		recovery_nets[i].netif = NULL;
+	}
+	recovery_net_count = 0;
+	recovery_rx_srv = NULL;
+}
+
 int run_http_recovery(void)
 {
-	struct udevice *udev;
-	struct netif *netif;
 	struct recovery_led_ctrl leds;
 	struct recovery_status_led_ctrl status_leds;
-	struct recovery_dhcp_server dhcp;
 	bool use_status_leds = false;
-	int rc;
+	bool dhcp_any = false;
+	int i, rc;
 
 	recovery_cancel_timeouts();
 	recv_off = recv_total = 0;
@@ -3411,9 +3604,9 @@ int run_http_recovery(void)
 		return rc;
 	}
 
-	udev = eth_get_dev();
-	if (!udev) {
-		printf("No active net device\n");
+	rc = recovery_net_setup();
+	if (rc <= 0) {
+		printf("No Ethernet device for recovery\n");
 		recovery_lwip_cleanup(NULL);
 		recovery_status_led_stop(&status_leds);
 		recovery_status_led_release(&status_leds);
@@ -3423,51 +3616,24 @@ int run_http_recovery(void)
 		return -ENODEV;
 	}
 
-	netif = net_lwip_new_netif(udev);
-	if (!netif) {
-		recovery_lwip_cleanup(NULL);
-		recovery_status_led_stop(&status_leds);
-		recovery_status_led_release(&status_leds);
-		recovery_led_stop(&leds);
-		recovery_led_ctrl_free(&leds);
-		net_lwip_eth_stop();
-		return -ENODEV;
+	for (i = 0; i < recovery_net_count; i++) {
+		airoha_recovery_restart_links(recovery_nets[i].udev);
+		if (recovery_nets[i].dhcp.pcb)
+			dhcp_any = true;
 	}
-
-	/*
-	 * get_udev_ipv4_info() reads per-sequence env vars (ipaddr, ipaddr1, ...),
-	 * but recovery_prepare_static_network() only sets the unsuffixed ones.
-	 * With ethact on a device whose seq != 0 the netif stays at 0.0.0.0/0.0.0.0
-	 * and the HTTP/DHCP recovery server becomes unreachable. Force the static
-	 * recovery address unless the user configured this device explicitly.
-	 */
-	if (ip4_addr_isany(netif_ip4_addr(netif)) ||
-	    ip4_addr_isany(netif_ip4_netmask(netif))) {
-		ip4_addr_t ip, mask, gw;
-
-		ip4addr_aton(RECOVERY_STATIC_IPADDR, &ip);
-		ip4addr_aton(RECOVERY_STATIC_NETMASK, &mask);
-		ip4addr_aton(RECOVERY_STATIC_GATEWAY, &gw);
-		netif_set_addr(netif, &ip, &mask, &gw);
-		printf("Recovery netif configured statically: %s/%s\n",
-		       RECOVERY_STATIC_IPADDR, RECOVERY_STATIC_NETMASK);
-	}
-
-	rc = recovery_dhcp_server_init(&dhcp, netif);
-	if (rc)
-		printf("Failed to start recovery DHCP server: %d\n", rc);
-	else
-		net_lwip_set_recovery_dhcp_hook(recovery_dhcp_recv, &dhcp);
+	if (dhcp_any)
+		net_lwip_set_recovery_dhcp_hook(recovery_dhcp_recv, NULL);
 
 	if (!recovery_httpd_started) {
 		httpd_init();
 		recovery_httpd_started = true;
 	}
-	printf("HTTP recovery server listening on http://%s/\n",
-	       ip4addr_ntoa(netif_ip4_addr(netif)));
+	for (i = 0; i < recovery_net_count; i++)
+		printf("HTTP recovery server listening on http://%s/ (%s)\n",
+		       ip4addr_ntoa(netif_ip4_addr(recovery_nets[i].netif)),
+		       recovery_nets[i].udev->name);
 	if (use_status_leds)
 		net_lwip_set_recovery_poll_hook(recovery_status_led_service, &status_leds);
-	airoha_recovery_restart_links(udev);
 
 	while (1) {
 		if (tstc()) {
@@ -3485,9 +3651,15 @@ int run_http_recovery(void)
 		 * serializes TCP ACKs behind several Clause-45 transactions and makes
 		 * LAN1/LAN2 uploads appear very slow. Resume probing once reception is
 		 * complete or when the server is idle. */
-		if (!post_ok || recv_off >= recv_total)
-			airoha_recovery_poll_link(udev);
-		net_lwip_rx(udev, netif);
+		for (i = 0; i < recovery_net_count; i++) {
+			if (!post_ok || recv_off >= recv_total)
+				airoha_recovery_poll_link(recovery_nets[i].udev);
+			recovery_rx_srv = recovery_nets[i].dhcp.pcb ?
+					  &recovery_nets[i].dhcp : NULL;
+			net_lwip_rx(recovery_nets[i].udev,
+				    recovery_nets[i].netif);
+		}
+		recovery_rx_srv = NULL;
 		if (use_status_leds)
 			recovery_status_led_poll(&status_leds);
 		recovery_led_poll(&leds);
@@ -3512,10 +3684,9 @@ int run_http_recovery(void)
 
 	net_lwip_set_recovery_poll_hook(NULL, NULL);
 	recovery_cancel_timeouts();
-	recovery_dhcp_server_stop(&dhcp);
 	net_lwip_set_recovery_dhcp_hook(NULL, NULL);
-	recovery_lwip_cleanup(netif);
-	net_lwip_remove_netif(netif);
+	recovery_net_teardown();
+	recovery_lwip_cleanup(NULL);
 	net_lwip_eth_stop();
 	recovery_status_led_stop(&status_leds);
 	recovery_status_led_release(&status_leds);
