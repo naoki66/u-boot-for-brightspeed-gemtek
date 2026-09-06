@@ -1,4 +1,4 @@
-name: Build signed XG2010G mtd0
+name: Build signed Brightspeed Gemtek mtd0
 
 on:
   push:
@@ -31,7 +31,6 @@ env:
   BUNDLED_ASSET_DIR: board/airoha/xg2010g/firmware
   BUNDLED_MTD0_PREFIX_SHA256: 82830140f4f8842702d0569065c27071b7cc24e0876e6c487cb4d9d81c294dd7
   CROSS_COMPILE: aarch64-linux-gnu-
-  DEFCONFIG: xg2010g_defconfig
   DEFAULT_FIP_ALIGN: "0x400"
   DEFAULT_FIP_OFFSET: "0x800"
   DEFAULT_MTD0_SIZE: "0x200000"
@@ -48,8 +47,12 @@ permissions:
 
 jobs:
   build:
-    name: Build U-Boot and signed mtd0
+    name: Build U-Boot and signed mtd0 (${{ matrix.board }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [xg2010g, xr1710g]
     outputs:
       artifact_name: ${{ steps.artifact.outputs.artifact_name }}
       bl31_name: ${{ steps.artifact.outputs.bl31_name }}
@@ -263,7 +266,7 @@ jobs:
             atf-tools/lzma-4.65/CPP/7zip/Compress/LZMA_Alone/lzma \
             atf-tools/lzma
 
-      - name: Build XG2010G BL2 and BL31
+      - name: Build BL2 and BL31
         env:
           AARCH64_CROSS_COMPILE: aarch64-linux-gnu-
           ARM32_CROSS_COMPILE: ${{ github.workspace }}/atf-tools/${{ env.BL2_TOOLCHAIN_NAME }}/bin/arm-none-eabi-
@@ -456,15 +459,15 @@ jobs:
             --tb-fw-cert certs/tb_fw.crt \
             --soc-fw-cert certs/soc_fw.crt \
             --nt-fw-cert certs/nt_fw.crt \
-            out/fip-xg2010g-signed.bin
+            out/fip-${{ matrix.board }}-signed.bin
 
-          "$FIPTOOL" info out/fip-xg2010g-signed.bin | tee out/fip-info.txt
+          "$FIPTOOL" info out/fip-${{ matrix.board }}-signed.bin | tee out/fip-info.txt
           "$FIPTOOL" unpack --force \
             --nt-fw out/fip-bl33-check.bin \
-            out/fip-xg2010g-signed.bin
+            out/fip-${{ matrix.board }}-signed.bin
           cmp out/fip-bl33-check.bin out/atf/bl33.bin
           rm -f out/fip-bl33-check.bin
-          check_fip_size out/fip-xg2010g-signed.bin "$((BL23_FIP_MAX_SIZE))"
+          check_fip_size out/fip-${{ matrix.board }}-signed.bin "$((BL23_FIP_MAX_SIZE))"
 
           # X 模式第一阶段需要同时携带 BL2 与 tb-fw 证书。
           "$FIPTOOL" create \
@@ -500,6 +503,7 @@ jobs:
       - name: Compose 2 MiB mtd0 image
         if: ${{ steps.signing.outputs.ready == 'true' }}
         env:
+          BOARD: ${{ matrix.board }}
           FIP_OFFSET: ${{ steps.params.outputs.fip_offset }}
           MTD0_SIZE: ${{ steps.params.outputs.mtd0_size }}
         run: |
@@ -512,7 +516,7 @@ jobs:
           mtd0_size = int(os.environ["MTD0_SIZE"], 0)
           fip_offset = int(os.environ["FIP_OFFSET"], 0)
           prefix = Path("signing/mtd0-prefix.bin").read_bytes() if fip_offset else b""
-          fip = Path("out/fip-xg2010g-signed.bin").read_bytes()
+          fip = Path("out/fip-%s-signed.bin" % os.environ["BOARD"]).read_bytes()
 
           if len(prefix) != fip_offset:
               raise SystemExit(f"prefix size {len(prefix)} != FIP offset {fip_offset}")
@@ -522,7 +526,7 @@ jobs:
           mtd0 = bytearray(b"\xff" * mtd0_size)
           mtd0[:fip_offset] = prefix
           mtd0[fip_offset:fip_offset + len(fip)] = fip
-          out = Path("out/mtd0-bootloader-xg2010g-signed.bin")
+          out = Path("out/mtd0-bootloader-%s-signed.bin" % os.environ["BOARD"])
           out.write_bytes(mtd0)
           print(f"mtd0 bytes: {len(mtd0)}")
           print(f"fip offset: 0x{fip_offset:x}")
@@ -530,7 +534,7 @@ jobs:
           print(f"fip end: 0x{fip_offset + len(fip):x}")
           print(f"mtd0 sha256: {hashlib.sha256(mtd0).hexdigest()}")
           PY
-          test "$(stat -c%s out/mtd0-bootloader-xg2010g-signed.bin)" = "${{ steps.params.outputs.mtd0_size_dec }}"
+          test "$(stat -c%s "out/mtd0-bootloader-${BOARD}-signed.bin")" = "${{ steps.params.outputs.mtd0_size_dec }}"
 
       - name: Prepare artifacts
         id: artifact
@@ -538,6 +542,7 @@ jobs:
           AIROHA_ATF_BUILD_REF: ${{ env.AIROHA_ATF_REF }}
           ATF_BUILD_BASE_REF: ${{ env.ATF_BASE_REF }}
           BL2_BUILD_TOOLCHAIN: ${{ env.BL2_TOOLCHAIN_NAME }}
+          BOARD: ${{ matrix.board }}
           BUILD_MODE: ${{ steps.mode.outputs.value }}
           COMMIT_SHORT: ${{ steps.version.outputs.commit }}
           DATE_STAMP: ${{ steps.version.outputs.date }}
@@ -556,41 +561,38 @@ jobs:
             exit 1
           fi
 
-          artifact_name="xg2010g-mtd0-${DATE_STAMP}-${COMMIT_SHORT}"
-          mtd0_name="xg2010g-${RELEASE_DATE}-${COMMIT_SHORT}-mtd0-signed.bin"
-          fip_name="xg2010g-${RELEASE_DATE}-${COMMIT_SHORT}-fip-signed.bin"
-          preloader_name="xg2010g-${RELEASE_DATE}-${COMMIT_SHORT}-ubi-preloader.bin"
-          recovery_fip_name="xg2010g-${RELEASE_DATE}-${COMMIT_SHORT}-ubi-bl31-uboot.fip"
-          bl31_name="xg2010g-${RELEASE_DATE}-${COMMIT_SHORT}-bl31.bin"
-          uboot_raw_name="xg2010g-${RELEASE_DATE}-${COMMIT_SHORT}-u-boot-raw.bin"
+          board="${BOARD}"
+          artifact_name="${board}-mtd0-${DATE_STAMP}-${COMMIT_SHORT}"
+          mtd0_name="${board}-${RELEASE_DATE}-${COMMIT_SHORT}-mtd0-signed.bin"
+          fip_name="${board}-${RELEASE_DATE}-${COMMIT_SHORT}-fip-signed.bin"
+          preloader_name="${board}-${RELEASE_DATE}-${COMMIT_SHORT}-ubi-preloader.bin"
+          recovery_fip_name="${board}-${RELEASE_DATE}-${COMMIT_SHORT}-ubi-bl31-uboot.fip"
+          bl31_name="${board}-${RELEASE_DATE}-${COMMIT_SHORT}-bl31.bin"
+          uboot_raw_name="${board}-${RELEASE_DATE}-${COMMIT_SHORT}-u-boot-raw.bin"
           mkdir -p build-output
 
-          test -s out/mtd0-bootloader-xg2010g-signed.bin
-          test -s out/fip-xg2010g-signed.bin
+          test -s "out/mtd0-bootloader-${board}-signed.bin"
+          test -s "out/fip-${board}-signed.bin"
           test -s out/ubi-preloader.bin
           test -s out/ubi-bl31-uboot.fip
           test -s signing/bl2.bin
           test -s signing/bl31.bin
           test -s u-boot.bin
 
-          cp u-boot.bin build-output/
           cp u-boot.bin "build-output/${uboot_raw_name}"
-          cp u-boot.bin build-output/u-boot-raw.bin
-          cp u-boot.img build-output/ 2>/dev/null || true
-          cp u-boot.dtb build-output/ 2>/dev/null || true
-          cp tools/mkimage build-output/ 2>/dev/null || true
-          cp out/mtd0-bootloader-xg2010g-signed.bin "build-output/${mtd0_name}"
-          cp out/fip-xg2010g-signed.bin "build-output/${fip_name}"
+          cp u-boot.dtb "build-output/${board}-u-boot.dtb" 2>/dev/null || true
+          cp u-boot.img "build-output/${board}-u-boot.img" 2>/dev/null || true
+          cp tools/mkimage build-output/mkimage 2>/dev/null || true
+          cp "out/mtd0-bootloader-${board}-signed.bin" "build-output/${mtd0_name}"
+          cp "out/fip-${board}-signed.bin" "build-output/${fip_name}"
           cp out/ubi-preloader.bin "build-output/${preloader_name}"
           cp signing/bl31.bin "build-output/${bl31_name}"
           cp out/ubi-bl31-uboot.fip "build-output/${recovery_fip_name}"
-          cp out/ubi-preloader.bin build-output/ubi-preloader.bin
-          cp signing/bl31.bin build-output/bl31.bin
-          cp out/ubi-bl31-uboot.fip build-output/ubi-bl31-uboot.fip
-          cp out/fip-info.txt build-output/
-          cp out/ubi-preloader-fip-info.txt build-output/
-          cp out/ubi-bl31-uboot-fip-info.txt build-output/
+          cp out/fip-info.txt "build-output/${board}-fip-info.txt"
+          cp out/ubi-preloader-fip-info.txt "build-output/${board}-ubi-preloader-fip-info.txt"
+          cp out/ubi-bl31-uboot-fip-info.txt "build-output/${board}-ubi-bl31-uboot-fip-info.txt"
           {
+            echo "Board: ${board}"
             echo "Build date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "Repository: ${GITHUB_REPOSITORY}"
             echo "Ref: ${GITHUB_REF_NAME}"
@@ -616,11 +618,11 @@ jobs:
             echo "Raw BL31: ${bl31_name}"
             echo "Certificate chain: BL2 tb-fw, BL31 soc-fw, U-Boot BL33 nt-fw"
             echo "Certificate files: generated during signing, not uploaded"
-          } > build-output/build-info.txt
+          } > "build-output/${board}-build-info.txt"
 
           sums_file=$(mktemp)
-          (cd build-output && find . -maxdepth 1 -type f ! -name sha256sums.txt -print0 | sort -z | xargs -0 sha256sum) > "$sums_file"
-          mv "$sums_file" build-output/sha256sums.txt
+          (cd build-output && find . -maxdepth 1 -type f ! -name '*sha256sums*' -print0 | sort -z | xargs -0 sha256sum) > "$sums_file"
+          mv "$sums_file" "build-output/${board}-sha256sums.txt"
 
           {
             echo "artifact_name=${artifact_name}"
@@ -655,60 +657,73 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
-          name: ${{ needs.build.outputs.artifact_name }}
           path: release-output
+
+      - name: Flatten and verify per-board assets
+        env:
+          COMMIT: ${{ needs.build.outputs.commit }}
+          RELEASE_DATE: ${{ needs.build.outputs.release_date }}
+        run: |
+          set -euo pipefail
+          # Each matrix leg uploads its own artifact directory; flatten them
+          # into release-output/ for a single combined release.
+          find release-output -mindepth 2 -maxdepth 2 -type f -exec mv -f {} release-output/ \;
+          find release-output -mindepth 1 -maxdepth 1 -type d -empty -delete
+
+          for board in xg2010g xr1710g; do
+            for suffix in mtd0-signed.bin fip-signed.bin ubi-preloader.bin ubi-bl31-uboot.fip bl31.bin u-boot-raw.bin sha256sums.txt build-info.txt; do
+              file="release-output/${board}-${RELEASE_DATE}-${COMMIT}-${suffix}"
+              if [ ! -s "$file" ]; then
+                echo "Release asset not found: $file" >&2
+                exit 1
+              fi
+            done
+          done
 
       - name: Create or update GitHub Release
         env:
-          BL31_NAME: ${{ needs.build.outputs.bl31_name }}
-          FIP_NAME: ${{ needs.build.outputs.fip_name }}
+          COMMIT: ${{ needs.build.outputs.commit }}
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MTD0_NAME: ${{ needs.build.outputs.mtd0_name }}
-          PRELOADER_NAME: ${{ needs.build.outputs.preloader_name }}
-          RECOVERY_FIP_NAME: ${{ needs.build.outputs.recovery_fip_name }}
+          RELEASE_DATE: ${{ needs.build.outputs.release_date }}
           RELEASE_MODE: ${{ needs.build.outputs.build_mode }}
           RELEASE_TAG: ${{ needs.build.outputs.tag }}
-          RELEASE_TITLE: XG2010G signed mtd0-${{ needs.build.outputs.release_date }}-g${{ needs.build.outputs.commit }}
-          UBOOT_RAW_NAME: ${{ needs.build.outputs.uboot_raw_name }}
+          RELEASE_TITLE: Brightspeed Gemtek signed mtd0-${{ needs.build.outputs.release_date }}-g${{ needs.build.outputs.commit }}
         run: |
           set -euo pipefail
-          mtd0_path="release-output/${MTD0_NAME}"
-          fip_path="release-output/${FIP_NAME}"
-          preloader_path="release-output/${PRELOADER_NAME}"
-          recovery_fip_path="release-output/${RECOVERY_FIP_NAME}"
-          bl31_path="release-output/${BL31_NAME}"
-          uboot_raw_path="release-output/${UBOOT_RAW_NAME}"
-          for file in "$mtd0_path" "$fip_path" "$preloader_path" "$recovery_fip_path" "$bl31_path" "$uboot_raw_path" release-output/sha256sums.txt release-output/build-info.txt; do
-            if [ ! -f "$file" ]; then
-              echo "Release asset not found: $file" >&2
-              exit 1
-            fi
+          paths=()
+          for board in xg2010g xr1710g; do
+            for suffix in mtd0-signed.bin fip-signed.bin ubi-preloader.bin ubi-bl31-uboot.fip bl31.bin u-boot-raw.bin sha256sums.txt build-info.txt; do
+              paths+=("release-output/${board}-${RELEASE_DATE}-${COMMIT}-${suffix}")
+            done
           done
 
           notes_file=$(mktemp)
           cat > "$notes_file" <<EOF
-          Automated signed bootloader build from commit [\`${{ needs.build.outputs.commit }}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}).
+          Automated signed bootloader build from commit [\`${COMMIT}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}).
 
           **Release channel:** ${RELEASE_MODE}
 
-          ## Files
+          **Boards:** \`xg2010g\` (Brightspeed Gemtek XG2010G) and \`xr1710g\` (Brightspeed Gemtek XR1710G).
 
-          - \`${MTD0_NAME}\` - 2 MiB \`/dev/mtd0\` bootloader image. Contains preserved prefix, BL2, BL31, signed certificates, and this repository's U-Boot as BL33.
-          - \`${FIP_NAME}\` - signed FIP only, placed at the configured mtd0 FIP offset.
-          - \`${PRELOADER_NAME}\` - signed FIP containing the compiled BL2 and its content certificate for XMODEM recovery.
-          - \`${RECOVERY_FIP_NAME}\` - BL31 + U-Boot FIP for the second XMODEM recovery transfer.
-          - \`${BL31_NAME}\` - compiled BL31 compressed with the Airoha LZMA container.
-          - \`${UBOOT_RAW_NAME}\` - raw U-Boot/BL33 from this build.
-          - \`sha256sums.txt\` - SHA256 checksums for all artifacts.
+          ## Files (per board, prefix \`<board>\` = \`xg2010g\` or \`xr1710g\`)
+
+          - \`<board>-${RELEASE_DATE}-${COMMIT}-mtd0-signed.bin\` - 2 MiB \`/dev/mtd0\` bootloader image. Contains preserved prefix, BL2, BL31, signed certificates, and this repository's U-Boot as BL33.
+          - \`<board>-${RELEASE_DATE}-${COMMIT}-fip-signed.bin\` - signed FIP only, placed at the configured mtd0 FIP offset.
+          - \`<board>-${RELEASE_DATE}-${COMMIT}-ubi-preloader.bin\` - signed FIP containing the compiled BL2 and its content certificate for XMODEM recovery.
+          - \`<board>-${RELEASE_DATE}-${COMMIT}-ubi-bl31-uboot.fip\` - BL31 + U-Boot FIP for the second XMODEM recovery transfer.
+          - \`<board>-${RELEASE_DATE}-${COMMIT}-bl31.bin\` - compiled BL31 compressed with the Airoha LZMA container.
+          - \`<board>-${RELEASE_DATE}-${COMMIT}-u-boot-raw.bin\` - raw U-Boot/BL33 from this build.
+          - \`<board>-${RELEASE_DATE}-${COMMIT}-sha256sums.txt\` - SHA256 checksums for this board's artifacts.
+          - \`<board>-${RELEASE_DATE}-${COMMIT}-build-info.txt\` - build metadata for this board.
 
           ## Flash boundary
 
-          Only write \`${MTD0_NAME}\` to the \`bootloader\` partition range \`0x00000000-0x00200000\` after serial-console validation. Do not write to \`uenv\` \`0x00200000-0x00400000\` or \`dsd\` \`0x00400000-0x00600000\`.
+          Only write \`<board>-...-mtd0-signed.bin\` to the \`bootloader\` partition range \`0x00000000-0x00200000\` after serial-console validation. Do not write to \`uenv\` \`0x00200000-0x00400000\` or \`dsd\` \`0x00400000-0x00600000\`. Use the image matching your board.
 
           ## Safety note
 
-          This image uses the pinned Airoha TF-A source, the preserved mtd0 prefix, and the configured signing key. Confirm the target boot policy before flashing.
+          These images use the pinned Airoha TF-A source, the preserved mtd0 prefix, and the configured signing key. Confirm the target boot policy before flashing.
           EOF
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
@@ -737,13 +752,4 @@ jobs:
             gh release create "$RELEASE_TAG" "${create_args[@]}"
           fi
 
-          gh release upload "$RELEASE_TAG" \
-            "$mtd0_path" \
-            "$fip_path" \
-            "$preloader_path" \
-            "$recovery_fip_path" \
-            "$bl31_path" \
-            "$uboot_raw_path" \
-            release-output/sha256sums.txt \
-            release-output/build-info.txt \
-            --clobber
+          gh release upload "$RELEASE_TAG" "${paths[@]}" --clobber

@@ -5,5 +5,8 @@ N:      airoha
 N:      an7581
 F:	arch/arm/dts/xg2010g.dts
 F:	arch/arm/dts/xg2010g-u-boot.dtsi
+F:	arch/arm/dts/xr1710g.dts
+F:	arch/arm/dts/xr1710g-u-boot.dtsi
 F:	configs/xg2010g_defconfig
+F:	configs/xr1710g_defconfig
 F:	doc/board/airoha/

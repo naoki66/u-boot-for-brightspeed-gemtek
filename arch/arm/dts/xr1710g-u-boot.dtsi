@@ -1,0 +1,106 @@
+// SPDX-License-Identifier: GPL-2.0+
+
+/*
+ * U-Boot-specific hardware description.  The SoC description and the
+ * board-level memory layout live in xr1710g.dts.
+ */
+
+#include "an7581-u-boot.dtsi"
+
+/* The board reserves the complete first 2 MiB for the early boot chain. */
+/delete-node/ &atf_reserved;
+
+/ {
+	aliases {
+		ethernet0 = &gdm4;
+		ethernet1 = &gdm1;
+		ethernet2 = &gdm2;
+	};
+
+	/*
+	 * The stock XR1710G exposes the external RTL8261 PHYs on the FE MDIO
+	 * controller instead of the switch-local MDIO block, matching the
+	 * verified XR1710G-http-uboot chainloader.  Reset GPIOs: PHY5 -> 46,
+	 * PHY8 -> 31, both active-low.
+	 */
+	mdio-bus {
+		compatible = "airoha,arht-mdio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		phy5: ethernet-phy@5 {
+			compatible = "ethernet-phy-ieee802.3-c45";
+			reg = <5>;
+			reset-gpios = <&en7581_pinctrl 46 GPIO_ACTIVE_LOW>;
+			reset-assert-us = <40000>;
+			reset-deassert-us = <150000>;
+			realtek,pnswap-tx;
+			realtek,pnswap-rx;
+		};
+
+		phy8: ethernet-phy@8 {
+			compatible = "ethernet-phy-ieee802.3-c45";
+			reg = <8>;
+			reset-gpios = <&en7581_pinctrl 31 GPIO_ACTIVE_LOW>;
+			reset-assert-us = <40000>;
+			reset-deassert-us = <150000>;
+			realtek,pnswap-tx;
+			realtek,pnswap-rx;
+		};
+	};
+};
+
+/* Enable the FE/QDMA block and mux the MDIO pins used by the board. */
+&eth {
+	pinctrl-names = "default";
+	pinctrl-0 = <&mdio_pins>;
+	status = "okay";
+};
+
+&en7581_pinctrl {
+	mdio_pins: mdio-pins {
+		mux {
+			function = "mdio";
+			groups = "mdio";
+		};
+
+		/*
+		 * Hold the MDIO data pin high as done by the ImmortalWrt
+		 * an7581-xr1710g-ubi.dts and the XR1710G-http-uboot
+		 * chainloader.
+		 */
+		conf {
+			pins = "gpio2";
+			output-high;
+		};
+	};
+};
+
+/* gdm1 is the internal switch CPU port (fixed-link from the SoC dtsi). */
+&gdm1 {
+	status = "okay";
+};
+
+/* External RTL8261 PHY8 (USXGMII). */
+&gdm2 {
+	status = "okay";
+	managed = "in-band-status";
+	phy-mode = "usxgmii";
+	phy-handle = <&phy8>;
+};
+
+/* External RTL8261 PHY5 (USXGMII). */
+&gdm4 {
+	status = "okay";
+	managed = "in-band-status";
+	phy-mode = "usxgmii";
+	phy-handle = <&phy5>;
+};
+
+&snfi {
+	status = "okay";
+};
+
+&spi_nand {
+	status = "okay";
+};

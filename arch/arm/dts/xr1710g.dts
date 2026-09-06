@@ -1,0 +1,105 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+
+/dts-v1/;
+
+/* BL2/BL31 use the first 2 MiB of DDR before handing off to U-Boot. */
+/memreserve/ 0x80000000 0x200000;
+
+#include <dt-bindings/gpio/gpio.h>
+#include "../../../dts/upstream/src/arm64/airoha/en7581.dtsi"
+
+/ {
+	model = "Brightspeed Gemtek XR1710G";
+	compatible = "gemtek,xr1710g-ubi", "gemtek,xr1710g",
+		     "econet,xr1710g-ubi", "econet,xr1710g",
+		     "airoha,en7581";
+
+	recovery-gpios = <&en7581_pinctrl 0 GPIO_ACTIVE_LOW>;
+
+	/*
+	 * LAN1/LAN2 jack link LEDs, software-driven during web recovery
+	 * (green = gigabit, yellow = 10/100), matching the verified
+	 * XR1710G-http-uboot chainloader.  The panel status LEDs below are
+	 * used for the breathing/sweep effect (see net/lwip/httpd_recovery.c).
+	 * Mapping from the ImmortalWrt an7581-xr1710g-ubi.dts:
+	 * sts_red/sts_green/sts_blue/sts_white = 29/17/19/20 and
+	 * lan1/lan2 green/yellow = 43/33 and 44/34, all active-low.
+	 */
+	recovery-green-led-gpios = <&en7581_pinctrl 43 GPIO_ACTIVE_LOW>,
+				   <&en7581_pinctrl 44 GPIO_ACTIVE_LOW>;
+	recovery-yellow-led-gpios = <&en7581_pinctrl 33 GPIO_ACTIVE_LOW>,
+				    <&en7581_pinctrl 34 GPIO_ACTIVE_LOW>;
+
+	leds {
+		compatible = "gpio-leds";
+
+		led-sts-red {
+			function = "status";
+			gpios = <&en7581_pinctrl 29 GPIO_ACTIVE_LOW>;
+		};
+
+		led-sts-green {
+			function = "status";
+			gpios = <&en7581_pinctrl 17 GPIO_ACTIVE_LOW>;
+		};
+
+		led-sts-blue {
+			function = "status";
+			gpios = <&en7581_pinctrl 19 GPIO_ACTIVE_LOW>;
+		};
+
+		led-sts-white {
+			function = "status";
+			gpios = <&en7581_pinctrl 20 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	aliases {
+		serial0 = &uart1;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+		linux,usable-memory-range = <0x0 0x80200000 0x0 0x7fe00000>;
+	};
+
+	/* The XR1710G ships with 2 GiB of DDR (verified chainloader layout). */
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x80000000>;
+	};
+};
+
+&spi_nand {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		bootloader@0 {
+			label = "bootloader";
+			reg = <0x00000000 0x00200000>;
+		};
+
+		uenv@200000 {
+			label = "uenv";
+			reg = <0x00200000 0x00200000>;
+		};
+
+		dsd@400000 {
+			label = "dsd";
+			reg = <0x00400000 0x00200000>;
+		};
+
+		ubi@600000 {
+			label = "ubi";
+			reg = <0x00600000 0x1b800000>;
+		};
+
+		reserved-bmt@1be00000 {
+			label = "reserved_bmt";
+			reg = <0x1be00000 0x04200000>;
+			read-only;
+		};
+	};
+};

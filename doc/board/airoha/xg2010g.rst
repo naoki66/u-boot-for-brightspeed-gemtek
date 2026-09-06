@@ -467,9 +467,9 @@ artifact：
 
 .. code-block:: console
 
-   gh variable set XG2010G_MTD0_SIZE --repo naoki66/u-boot-xg2010g --body 0x200000
-   gh variable set XG2010G_FIP_OFFSET --repo naoki66/u-boot-xg2010g --body 0x800
-   gh variable set XG2010G_FIP_ALIGN --repo naoki66/u-boot-xg2010g --body 0x400
+   gh variable set XG2010G_MTD0_SIZE --repo naoki66/u-boot-for-brightspeed-gemtek --body 0x200000
+   gh variable set XG2010G_FIP_OFFSET --repo naoki66/u-boot-for-brightspeed-gemtek --body 0x800
+   gh variable set XG2010G_FIP_ALIGN --repo naoki66/u-boot-for-brightspeed-gemtek --body 0x400
 
 TF-A 工具版本固定在 workflow 内的 ``FIXED_TFA_REF=v2.13.0``，用于构建
 ``fiptool`` 和 ``cert_create``。手动运行 Actions 时不再提供 TF-A ref 输入，
@@ -484,14 +484,14 @@ BL2/BL31 使用 TF-A ``v2.10`` 基线、Airoha overlay
 
 .. code-block:: console
 
-   gh secret set XG2010G_TB_PRIVATE_KEY --repo naoki66/u-boot-xg2010g < private_key.pem
+   gh secret set XG2010G_TB_PRIVATE_KEY --repo naoki66/u-boot-for-brightspeed-gemtek < private_key.pem
 
 如需覆盖 mtd0 前导区，可设置对应 Secret 和校验变量：
 
 .. code-block:: console
 
-   gh secret set XG2010G_MTD0_PREFIX_URL --repo naoki66/u-boot-xg2010g --body "https://private.example/mtd0-prefix.bin"
-   gh variable set XG2010G_MTD0_PREFIX_SHA256 --repo naoki66/u-boot-xg2010g --body "<sha256>"
+   gh secret set XG2010G_MTD0_PREFIX_URL --repo naoki66/u-boot-for-brightspeed-gemtek --body "https://private.example/mtd0-prefix.bin"
+   gh variable set XG2010G_MTD0_PREFIX_SHA256 --repo naoki66/u-boot-for-brightspeed-gemtek --body "<sha256>"
 
 每次 Actions 构建都必须完成签名，否则 workflow 失败且不上传 artifact。
 签名成功的 artifact 包含救砖和调试用文件：
@@ -603,3 +603,39 @@ Trusted Boot，通常还需要平台专用的证书、密钥、UUID、载入地�
 将 FIP 放入 mtd0 时，还要确认原厂镜像的前导数据、FIP 在 mtd0 中的偏移、
 NAND 坏块处理和 BootROM 的复制规则。建议先通过串口验证 U-Boot 能识别
 NAND 和分区，再在 Linux 中确认 ``cat /proc/mtd`` 的边界与本 DTS 一致。
+
+XR1710G 差异
+------------
+
+Brightspeed Gemtek XR1710G 与 XG2010G 共用同一套启动链、NAND 分区布局、uenv/dsd 处理
+和 Recovery 流程，因此由同一份板级支持代码（``board/airoha/an7581``）同时
+服务两板，仅通过设备树区分硬件差异。XR1710G 使用
+``configs/xr1710g_defconfig`` 与 ``arch/arm/dts/xr1710g.dts`` 构建，
+板级 compatible 为 ``gemtek,xr1710g(-ubi)`` 与
+``econet,xr1710g(-ubi)``。
+
+XR1710G 的硬件差异要点（依据实测可用的 XR1710G-http-uboot chainloader 与
+ImmortalWrt ``an7581-xr1710g-ubi.dts``）：
+
+* 内存为 2 GiB DDR（XG2010G 为 1 GiB）；
+* 面板状态灯 sts 红/绿/蓝/白 位于统一 ``en7581_pinctrl`` 的 GPIO
+  29/17/19/20（低有效），与 XG2010G 的 43/44/45/33 不同；
+* 两个外部 Realtek PHY（phy5/phy8）与 XG2010G 一样挂在 FE MDIO
+  （``airoha,arht-mdio``），不在交换芯片 MDIO 上；phy5 复位 GPIO 为 46，
+  phy8 复位 GPIO 为 31，均为低有效，且需要 ``realtek,pnswap-tx/rx`` 极性
+  交换；交换芯片保持原生端口映射（内部 PHY 9/10），本仓库 U-Boot 的
+  switch 自动轮询窗口固定为 8..12，刚好覆盖 9/10 与 XG2010G 的 12；
+* ``gdm4`` 通过 USXGMII 连接 phy5，``gdm2`` 通过 USXGMII 连接 phy8；
+  ``gdm1`` 仍为交换芯片 CPU 口，LAN1/LAN2 两个网口由内部交换口提供；
+* LAN1/LAN2 网口绿/黄灯是软件 GPIO（绿 43/44、黄 33/34，低有效），
+  恢复页按链路速度点亮：千兆亮绿灯、10/100M 亮黄灯、有流量时 100ms
+  周期闪烁；XG2010G 的 LAN4 口绿/黄灯（46/42）同理；
+* MDIO 引脚组额外包含 ``gpio2`` 输出高电平的 conf，与 ImmortalWrt 板级
+  DTS 和 chainloader 保持一致；
+* RESET 键同为 ``en7581_pinctrl`` GPIO 0，低有效，Recovery 行为与 XG2010G
+  完全一致。
+
+Recovery 的端口/PHY 映射在 ``net/lwip/httpd_recovery.c`` 中按板区分：
+XG2010G 使用 FE/switch 混合映射，XR1710G 两个恢复网口均指向 FE MDIO
+上的 phy5/phy8。两板的 Web Recovery 地址、无痕模式要求和 UBI 重建流程
+相同。

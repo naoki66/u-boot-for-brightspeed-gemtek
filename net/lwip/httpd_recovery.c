@@ -101,7 +101,7 @@ unsigned long airoha_recovery_get_lan_activity_ms(void)
 #define RECOVERY_DHCP_BROADCAST_IPADDR   "192.168.1.255"
 #define RECOVERY_DHCP_LEASE_SECS         86400U
 #define RECOVERY_DHCP_MAX_MSG_LEN        1500
-#define RECOVERY_LED_PORTS     1
+#define RECOVERY_LED_MAX_PORTS 2
 #define RECOVERY_LED_POLL_MS   100
 #define RECOVERY_LED_PHY_POLL_MS 500
 #define RECOVERY_LED_MDIO_BACKOFF_MS 5000
@@ -281,7 +281,7 @@ struct recovery_led_ctrl {
 	ulong last_phy_poll;
 	ulong last_mdio_error;
 	bool mdio_fault;
-	int speed[RECOVERY_LED_PORTS];
+	int speed[RECOVERY_LED_MAX_PORTS];
 };
 
 struct recovery_gpio_pin {
@@ -332,32 +332,80 @@ static int recovery_net_count;
 static struct recovery_dhcp_server *recovery_rx_srv;
 
 /*
- * Real PHY link state for the recovery ports (XG2010G wiring):
- *   eth0/gdm4 -> FE MDIO PHY5   (RTL8261N, clause 45)
- *   eth1/gdm1 -> FE MDIO PHY15  (EN8811H, clause 22)
- *   eth2/gdm2 -> switch MDIO PHY12 (LAN4 behind the switch)
+ * Real PHY link state for the recovery ports:
+ *   XG2010G:
+ *     eth0/gdm4 -> FE MDIO PHY5   (RTL8261N, clause 45)
+ *     eth1/gdm1 -> FE MDIO PHY15  (EN8811H, clause 22)
+ *     eth2/gdm2 -> switch MDIO PHY12 (LAN4 behind the switch)
+ *   XR1710G:
+ *     eth0/gdm4 -> switch MDIO PHY5 (clause 45)
+ *     eth1/gdm1 -> switch CPU port (fixed link, always up)
+ *     eth2/gdm2 -> switch MDIO PHY8 (clause 45)
  * Feeding netif_set_link_up/down() keeps lwIP's ip4_route() on the port
  * that actually has a cable: with all netifs sharing 192.168.1.1/24,
  * only the link-up netif is eligible for TCP reply routing. Ports
  * without a known PHY mapping stay link-up. Read errors are ignored so
  * a broken MDIO bus never takes a working port out of the routing pool.
  */
+struct recovery_phy_map {
+	unsigned int seq;
+	bool switch_mdio;
+	int phy;
+};
+
+static const struct recovery_phy_map recovery_phy_map_xg2010g[] = {
+	{ 0, false, 5 },
+	{ 1, false, 0xf },
+	{ 2, true, 12 },
+};
+
+static const struct recovery_phy_map recovery_phy_map_xr1710g[] = {
+	{ 0, false, 5 },
+	{ 2, false, 8 },
+};
+
+static const struct recovery_phy_map *recovery_phy_map(void)
+{
+	if (of_machine_is_compatible("gemtek,xr1710g") ||
+	    of_machine_is_compatible("gemtek,xr1710g-ubi") ||
+	    of_machine_is_compatible("econet,xr1710g") ||
+	    of_machine_is_compatible("econet,xr1710g-ubi"))
+		return recovery_phy_map_xr1710g;
+
+	return recovery_phy_map_xg2010g;
+}
+
+static const struct recovery_phy_map *recovery_phy_map_find(unsigned int seq)
+{
+	const struct recovery_phy_map *map = recovery_phy_map();
+	size_t count, i;
+
+	count = map == recovery_phy_map_xr1710g ?
+		ARRAY_SIZE(recovery_phy_map_xr1710g) :
+		ARRAY_SIZE(recovery_phy_map_xg2010g);
+
+	for (i = 0; i < count; i++)
+		if (map[i].seq == seq)
+			return &map[i];
+
+	return NULL;
+}
+
 static struct udevice *recovery_port_mdio_dev(unsigned int seq)
 {
 	static struct udevice *fe_mdio;
 	static struct udevice *sw_mdio;
+	const struct recovery_phy_map *entry;
 	struct udevice **dev;
 	ofnode node;
 
-	if (seq == 0 || seq == 1)
-		dev = &fe_mdio;
-	else if (seq == 2)
-		dev = &sw_mdio;
-	else
+	entry = recovery_phy_map_find(seq);
+	if (!entry)
 		return NULL;
 
+	dev = entry->switch_mdio ? &sw_mdio : &fe_mdio;
 	if (!*dev) {
-		if (seq == 2)
+		if (entry->switch_mdio)
 			node = ofnode_path("/soc/switch@1fb58000/mdio");
 		else
 			node = ofnode_path("/mdio-bus");
@@ -372,6 +420,7 @@ static struct udevice *recovery_port_mdio_dev(unsigned int seq)
 void airoha_recovery_poll_link(struct udevice *dev)
 {
 	struct recovery_net_ctx *net = NULL;
+	const struct recovery_phy_map *entry;
 	struct udevice *mdio_dev;
 	unsigned int seq;
 	int phy, bmsr, i;
@@ -389,19 +438,10 @@ void airoha_recovery_poll_link(struct udevice *dev)
 		return;
 
 	seq = (unsigned int)dev_seq(dev);
-	switch (seq) {
-	case 0:
-		phy = 5;
-		break;
-	case 1:
-		phy = 0xf;
-		break;
-	case 2:
-		phy = 12;
-		break;
-	default:
+	entry = recovery_phy_map_find(seq);
+	if (!entry)
 		return;
-	}
+	phy = entry->phy;
 
 	if (get_timer(net->last_link_poll) < RECOVERY_LED_PHY_POLL_MS)
 		return;
@@ -425,22 +465,37 @@ void airoha_recovery_poll_link(struct udevice *dev)
 		netif_set_link_down(net->netif);
 }
 
-/* XG2010G LAN4 is the sole switch-facing recovery LED pair (PHY12). */
-static const int recovery_led_phy_addrs[RECOVERY_LED_PORTS] = { 12 };
-static u8 recovery_green_led_gpios[RECOVERY_LED_PORTS] = { 46 };
-static u8 recovery_yellow_led_gpios[RECOVERY_LED_PORTS] = { 42 };
+/*
+ * Switch-facing recovery LED pairs: XG2010G has one pair on switch PHY12
+ * (LAN4); XR1710G has two pairs on switch PHY9/10 (LAN1/LAN2), matching
+ * the verified XR1710G-http-uboot chainloader.  The GPIO numbers and the
+ * active pair count come from the board DTS.
+ */
+static int recovery_led_phy_addrs[RECOVERY_LED_MAX_PORTS] = { 12, 12 };
+static u8 recovery_green_led_gpios[RECOVERY_LED_MAX_PORTS] = { 46, 46 };
+static u8 recovery_yellow_led_gpios[RECOVERY_LED_MAX_PORTS] = { 42, 42 };
+static int recovery_led_port_count;
 static bool recovery_led_gpios_loaded;
+/*
+ * Only drive the link LEDs when the board DTS actually describes them.
+ * Without this gate an XR1710G would fall back to the XG2010G defaults,
+ * where gpio46 resets the XR1710G PHY5.
+ */
+static bool recovery_lan_led_available;
 
 /*
  * Load the recovery link-LED GPIOs from the board DTS
- * (recovery-green-led-gpios / recovery-yellow-led-gpios). The XG2010G
- * values are kept as the default fallback.
+ * (recovery-green-led-gpios / recovery-yellow-led-gpios).  The entries
+ * are parsed until the property runs out, so XG2010G (one pair) and
+ * XR1710G (two pairs) share this path.  Boards that do not provide both
+ * properties keep the software link-LED feature disabled.
  */
 static void recovery_led_load_gpios(void)
 {
 	struct ofnode_phandle_args args;
-	u8 green[RECOVERY_LED_PORTS];
-	u8 yellow[RECOVERY_LED_PORTS];
+	u8 green[RECOVERY_LED_MAX_PORTS];
+	u8 yellow[RECOVERY_LED_MAX_PORTS];
+	int green_count = 0, yellow_count = 0;
 	ofnode root;
 	int i;
 
@@ -448,28 +503,42 @@ static void recovery_led_load_gpios(void)
 		return;
 
 	recovery_led_gpios_loaded = true;
+	recovery_led_port_count = 0;
 	root = ofnode_path("/");
 	if (!ofnode_valid(root))
 		return;
 
-	for (i = 0; i < RECOVERY_LED_PORTS; i++) {
+	for (i = 0; i < RECOVERY_LED_MAX_PORTS; i++) {
 		if (ofnode_parse_phandle_with_args(root, "recovery-green-led-gpios",
-						  "#gpio-cells", i, 0, &args) ||
+						   "#gpio-cells", i, 0, &args) ||
 		    args.args_count < 1)
-			return;
-		green[i] = (u8)args.args[0];
+			break;
+		green[green_count++] = (u8)args.args[0];
 	}
 
-	for (i = 0; i < RECOVERY_LED_PORTS; i++) {
+	for (i = 0; i < RECOVERY_LED_MAX_PORTS; i++) {
 		if (ofnode_parse_phandle_with_args(root, "recovery-yellow-led-gpios",
-						  "#gpio-cells", i, 0, &args) ||
+						   "#gpio-cells", i, 0, &args) ||
 		    args.args_count < 1)
-			return;
-		yellow[i] = (u8)args.args[0];
+			break;
+		yellow[yellow_count++] = (u8)args.args[0];
 	}
 
-	memcpy(recovery_green_led_gpios, green, sizeof(green));
-	memcpy(recovery_yellow_led_gpios, yellow, sizeof(yellow));
+	if (!green_count || green_count != yellow_count)
+		return;
+
+	memcpy(recovery_green_led_gpios, green, green_count);
+	memcpy(recovery_yellow_led_gpios, yellow, yellow_count);
+
+	if (of_machine_is_compatible("gemtek,xr1710g") ||
+	    of_machine_is_compatible("gemtek,xr1710g-ubi")) {
+		/* XR1710G LAN1/LAN2 link state: switch internal PHY9/10. */
+		recovery_led_phy_addrs[0] = 9;
+		recovery_led_phy_addrs[1] = 10;
+	}
+
+	recovery_led_port_count = green_count;
+	recovery_lan_led_available = true;
 }
 
 static void recovery_led_ctrl_free(struct recovery_led_ctrl *ctrl)
@@ -576,7 +645,10 @@ static void recovery_led_stop(struct recovery_led_ctrl *ctrl)
 
 	recovery_led_load_gpios();
 
-	for (i = 0; i < RECOVERY_LED_PORTS; i++) {
+	if (!recovery_lan_led_available)
+		return;
+
+	for (i = 0; i < recovery_led_port_count; i++) {
 		recovery_led_set_pin(recovery_green_led_gpios[i], 0);
 		recovery_led_set_pin(recovery_yellow_led_gpios[i], 0);
 	}
@@ -1431,6 +1503,9 @@ static int recovery_led_init(struct recovery_led_ctrl *ctrl)
 	memset(ctrl, 0, sizeof(*ctrl));
 	recovery_led_load_gpios();
 
+	if (!recovery_lan_led_available)
+		return 0;
+
 	/* Make sure PHY LED mux is disabled so software can own the lines. */
 	recovery_clrsetbits_le32(RECOVERY_CHIP_SCU_BASE + RECOVERY_REG_GPIO_2ND_I2C_MODE,
 				 RECOVERY_GPIO_LAN0_LED0_MODE_MASK |
@@ -1438,7 +1513,7 @@ static int recovery_led_init(struct recovery_led_ctrl *ctrl)
 				 RECOVERY_GPIO_LAN1_LED0_MODE_MASK |
 				 RECOVERY_GPIO_LAN1_LED1_MODE_MASK, 0);
 
-	for (i = 0; i < RECOVERY_LED_PORTS; i++) {
+	for (i = 0; i < recovery_led_port_count; i++) {
 		recovery_gpio_prepare_output(recovery_green_led_gpios[i]);
 		recovery_gpio_prepare_output(recovery_yellow_led_gpios[i]);
 		recovery_led_set_pin(recovery_green_led_gpios[i], 0);
@@ -1460,7 +1535,8 @@ static int recovery_led_phy_speed(struct recovery_led_ctrl *ctrl, int idx)
 {
 	int bmcr, bmsr, stat1000, ctrl1000, lpa;
 
-	if (!ctrl->mdio_dev || idx >= ARRAY_SIZE(recovery_led_phy_addrs))
+	if (!ctrl->mdio_dev || idx >= recovery_led_port_count ||
+	    idx >= ARRAY_SIZE(recovery_led_phy_addrs))
 		return 0;
 
 	bmsr = dm_mdio_read(ctrl->mdio_dev, recovery_led_phy_addrs[idx],
@@ -1529,6 +1605,9 @@ static void recovery_led_poll(struct recovery_led_ctrl *ctrl)
 	bool poll_phys;
 	int i;
 
+	if (!recovery_lan_led_available)
+		return;
+
 	now = get_timer(0);
 	if (ctrl->last_poll && now - ctrl->last_poll < RECOVERY_LED_POLL_MS)
 		return;
@@ -1542,7 +1621,7 @@ static void recovery_led_poll(struct recovery_led_ctrl *ctrl)
 
 	if (poll_phys) {
 		ctrl->last_phy_poll = now;
-		for (i = 0; i < RECOVERY_LED_PORTS; i++) {
+		for (i = 0; i < recovery_led_port_count; i++) {
 			int speed = recovery_led_phy_speed(ctrl, i);
 
 			if (speed < 0) {
@@ -1554,7 +1633,7 @@ static void recovery_led_poll(struct recovery_led_ctrl *ctrl)
 			ctrl->speed[i] = speed;
 		}
 
-		if (i == RECOVERY_LED_PORTS)
+		if (i == recovery_led_port_count)
 			ctrl->mdio_fault = false;
 	}
 
@@ -1563,7 +1642,7 @@ static void recovery_led_poll(struct recovery_led_ctrl *ctrl)
 	blink_on = !activity ||
 		   ((now / RECOVERY_LED_BLINK_MS) & 1);
 
-	for (i = 0; i < RECOVERY_LED_PORTS; i++) {
+	for (i = 0; i < recovery_led_port_count; i++) {
 		recovery_led_set_pin(recovery_green_led_gpios[i],
 				     ctrl->speed[i] == SPEED_1000 && blink_on);
 		recovery_led_set_pin(recovery_yellow_led_gpios[i],

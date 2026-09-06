@@ -79,13 +79,30 @@ static const char *const xg2010g_fdt_wan_mac_paths[] = {
 	"/soc/ethernet@1fb50000/ethernet@2",
 };
 
+/*
+ * The Brightspeed Gemtek AN7581 boards (XG2010G and XR1710G) share the
+ * same NAND layout, uenv/dsd handling and recovery flow, so one board
+ * support file serves both.
+ */
 static bool xg2010g_is_compatible(void)
 {
 	return of_machine_is_compatible("naoki,xg2010g") ||
 	       of_machine_is_compatible("econet,xg2010g") ||
 	       of_machine_is_compatible("econet,xg2010g-ubi") ||
 	       of_machine_is_compatible("gemtek,xg2010g") ||
-	       of_machine_is_compatible("gemtek,xg2010g-ubi");
+	       of_machine_is_compatible("gemtek,xg2010g-ubi") ||
+	       of_machine_is_compatible("gemtek,xr1710g") ||
+	       of_machine_is_compatible("gemtek,xr1710g-ubi") ||
+	       of_machine_is_compatible("econet,xr1710g") ||
+	       of_machine_is_compatible("econet,xr1710g-ubi");
+}
+
+static bool xr1710g_is_compatible(void)
+{
+	return of_machine_is_compatible("gemtek,xr1710g") ||
+	       of_machine_is_compatible("gemtek,xr1710g-ubi") ||
+	       of_machine_is_compatible("econet,xr1710g") ||
+	       of_machine_is_compatible("econet,xr1710g-ubi");
 }
 
 const char *an7581_release_version(void)
@@ -946,9 +963,11 @@ int board_late_init(void)
 	ulong recovery_addr;
 	bool uenv_triggered = false;
 
-	printf("XG2010G release %s - %s\n",
+	printf("%s release %s - %s\n",
+	       xr1710g_is_compatible() ? "Brightspeed Gemtek XR1710G"
+				       : "Brightspeed Gemtek XG2010G",
 	       XG2010G_RELEASE_VERSION, XG2010G_RELEASE_CREDIT);
-	printf("XG2010G HTTP recovery: type 'http_recovery', then open http://192.168.1.1/ in incognito mode (PC 192.168.1.2/24)\n");
+	printf("HTTP recovery: type 'http_recovery', then open http://192.168.1.1/ in incognito mode (PC 192.168.1.2/24)\n");
 
 	/* Read only the one-shot mtd1/uenv flag; never save mtd0 env. */
 	if (xg2010g_is_compatible()) {

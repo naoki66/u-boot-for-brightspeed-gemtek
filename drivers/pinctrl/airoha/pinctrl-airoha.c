@@ -746,6 +746,7 @@ static const struct pinconf_param airoha_pinconf_params[] = {
 	{ "drive-strength",   PIN_CONFIG_DRIVE_STRENGTH,   0 },
 	{ "drive-open-drain", PIN_CONFIG_DRIVE_OPEN_DRAIN, 0 },
 	{ "output-enable",    PIN_CONFIG_OUTPUT_ENABLE,    1 },
+	{ "output-high",      PIN_CONFIG_OUTPUT,           1 },
 	{ "input-enable",     PIN_CONFIG_INPUT_ENABLE,     1 },
 };
 

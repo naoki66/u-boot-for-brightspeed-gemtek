@@ -6,6 +6,6 @@
 
 /* Keep the board banner tied to U-Boot's generated SCM version. */
 #define XG2010G_RELEASE_VERSION PLAIN_VERSION
-#define XG2010G_RELEASE_CREDIT  "XG2010G port by naoki66; http-uboot recovery"
+#define XG2010G_RELEASE_CREDIT  "Brightspeed Gemtek XG2010G & XR1710G port by naoki66; http-uboot recovery"
 
 #endif /* __XG2010G_VERSION_H */
