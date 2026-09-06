@@ -3434,6 +3434,25 @@ int run_http_recovery(void)
 		return -ENODEV;
 	}
 
+	/*
+	 * get_udev_ipv4_info() reads per-sequence env vars (ipaddr, ipaddr1, ...),
+	 * but recovery_prepare_static_network() only sets the unsuffixed ones.
+	 * With ethact on a device whose seq != 0 the netif stays at 0.0.0.0/0.0.0.0
+	 * and the HTTP/DHCP recovery server becomes unreachable. Force the static
+	 * recovery address unless the user configured this device explicitly.
+	 */
+	if (ip4_addr_isany(netif_ip4_addr(netif)) ||
+	    ip4_addr_isany(netif_ip4_netmask(netif))) {
+		ip4_addr_t ip, mask, gw;
+
+		ip4addr_aton(RECOVERY_STATIC_IPADDR, &ip);
+		ip4addr_aton(RECOVERY_STATIC_NETMASK, &mask);
+		ip4addr_aton(RECOVERY_STATIC_GATEWAY, &gw);
+		netif_set_addr(netif, &ip, &mask, &gw);
+		printf("Recovery netif configured statically: %s/%s\n",
+		       RECOVERY_STATIC_IPADDR, RECOVERY_STATIC_NETMASK);
+	}
+
 	rc = recovery_dhcp_server_init(&dhcp, netif);
 	if (rc)
 		printf("Failed to start recovery DHCP server: %d\n", rc);
