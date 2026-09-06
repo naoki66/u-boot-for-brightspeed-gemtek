@@ -128,7 +128,6 @@ signed mtd0/FIP。
 | 🟢 能进原厂 U-Boot / TTL，要替换 bootloader | `xg2010g-...-mtd0-signed.bin` | [TTL/TFTP 刷入](#-ttltftp-刷入-mtd0)，只擦写 `0x000000` 起 `0x200000` |
 | 🔴 mtd0 写坏、NAND 无法启动 | `ubi-preloader.bin` + `ubi-bl31-uboot.fip` | [X 模式 XMODEM 救砖](#-x-模式与-web-recovery)，再走 Web Recovery |
 | 🔵 只升级系统，不动 bootloader | `ubi-squashfs-sysupgrade.itb` | 只刷 `ubi` 区域（`0x00600000` 起，440 MiB），必须重建 UBI |
-| 🟡 本地开发 / 调试 | `u-boot.bin`（BL33 候选） | [本地构建](#-本地构建)，产物仅用于调试 |
 
 **关键参数速查：**
 
