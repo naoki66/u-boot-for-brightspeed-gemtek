@@ -69,6 +69,14 @@ __weak void airoha_recovery_restart_links(struct udevice *dev)
 	(void)dev;
 }
 
+/* Tick of the last packet seen from the LAN side, for the activity LED. */
+static ulong lan_activity_ms;
+
+unsigned long airoha_recovery_get_lan_activity_ms(void)
+{
+	return lan_activity_ms;
+}
+
 /*
  * Upload buffer
  * Use env 'recovery_addr' if set, otherwise fall back to U-Boot 'loadaddr'.
@@ -1276,6 +1284,8 @@ static void recovery_dhcp_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
 
 	if (!p)
 		return;
+
+	lan_activity_ms = get_timer(0);
 
 	/* Broadcast DHCP arrives via the net-lwip dispatch hook (arg == NULL);
 	 * unicast renewals arrive through the per-pcb callback (arg == srv). */
@@ -3157,6 +3167,8 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p)
 	struct pbuf *q;
 	bool overflow = false;
 	u16_t recved = 0;
+
+	lan_activity_ms = get_timer(0);
 
 	if (reboot_post_pending) {
 		pbuf_free(p);
