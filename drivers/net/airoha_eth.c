@@ -13,6 +13,7 @@
 #include <dm/devres.h>
 #include <dm/lists.h>
 #include <mapmem.h>
+#include <malloc.h>
 #include <miiphy.h>
 #include <net.h>
 #include <regmap.h>
@@ -45,6 +46,7 @@
 #define RX_DSCP_NUM			PKTBUFSRX
 
 #define AIROHA_GDM_PORT_STRING_LEN	sizeof("airoha-gdmX.Y")
+#define AIROHA_RX_STASH_DEPTH		8
 
 /* SCU */
 #define SCU_SHARE_FEMEM_SEL		0x958
@@ -337,6 +339,12 @@ struct airoha_gdm_port {
 	u8 xsi_channel;
 	u8 xsi_nboq;
 	u8 xsi_src_port;
+
+	uchar *rx_stash;
+	u16 rx_stash_len[AIROHA_RX_STASH_DEPTH];
+	u8 rx_stash_head;
+	u8 rx_stash_tail;
+	u8 rx_stash_count;
 };
 
 struct airoha_eth {
@@ -351,6 +359,8 @@ struct airoha_eth {
 
 	struct airoha_qdma qdma[AIROHA_MAX_NUM_QDMA];
 	u8 gdm_port_count[AIROHA_MAX_NUM_GDM_PORTS + 1];
+	struct udevice *gdm_port_dev[AIROHA_MAX_NUM_GDM_PORTS + 1]
+				    [AIROHA_MAX_GDM_PORT_INSTANCES];
 	char gdm_port_str[AIROHA_MAX_NUM_GDM_PORTS + 1]
 			 [AIROHA_MAX_GDM_PORT_INSTANCES]
 			 [AIROHA_GDM_PORT_STRING_LEN];
@@ -886,8 +896,14 @@ static int airoha_alloc_gdm_port(struct udevice *dev, ofnode node)
 			 "airoha-gdm%d", id);
 	eth->gdm_port_count[id]++;
 
-	return device_bind_with_driver_data(dev, gdm_drv, str,
-					    (ulong)eth, node, &gdm_dev);
+	ret = device_bind_with_driver_data(dev, gdm_drv, str,
+					   (ulong)eth, node, &gdm_dev);
+	if (ret)
+		return ret;
+
+	eth->gdm_port_dev[id][instance] = gdm_dev;
+
+	return 0;
 }
 
 static struct udevice *airoha_switch_mdio_init(struct udevice *dev)
@@ -1047,6 +1063,13 @@ static int airoha_eth_port_probe(struct udevice *dev)
 	int ret;
 
 	port->qdma = &eth->qdma[0];
+	if (!port->rx_stash) {
+		port->rx_stash = memalign(PKTALIGN,
+					  AIROHA_RX_STASH_DEPTH *
+					  PKTSIZE_ALIGN);
+		if (!port->rx_stash)
+			return -ENOMEM;
+	}
 
 	ret = airoha_fe_init(port);
 	if (ret)
@@ -1086,6 +1109,9 @@ static int airoha_eth_init(struct udevice *dev)
 
 	qid = 0;
 	q = &qdma->q_rx[qid];
+	port->rx_stash_head = 0;
+	port->rx_stash_tail = 0;
+	port->rx_stash_count = 0;
 
 	airoha_qdma_init_rx_desc(q);
 
@@ -1260,14 +1286,103 @@ static void airoha_qdma_release_rx_desc(struct airoha_qdma *qdma,
 	q->head = (q->head + 1) % q->ndesc;
 }
 
+static struct airoha_gdm_port *
+airoha_rx_find_xsi_port(struct airoha_eth *eth, u8 sport)
+{
+	struct airoha_gdm_port *port;
+	struct udevice *dev;
+	int id, instance;
+
+	for (id = 0; id < ARRAY_SIZE(eth->gdm_port_dev); id++) {
+		for (instance = 0; instance < AIROHA_MAX_GDM_PORT_INSTANCES;
+		     instance++) {
+			dev = eth->gdm_port_dev[id][instance];
+			if (!dev)
+				continue;
+
+			port = dev_get_priv(dev);
+			if (port->has_xsi_src_port &&
+			    port->xsi_src_port == sport)
+				return port;
+		}
+	}
+
+	return NULL;
+}
+
+static bool airoha_rx_packet_is_stashed(struct airoha_gdm_port *port,
+					uchar *packet)
+{
+	ulong start, end, ptr;
+
+	if (!port->rx_stash || !packet)
+		return false;
+
+	start = (ulong)port->rx_stash;
+	end = start + AIROHA_RX_STASH_DEPTH * PKTSIZE_ALIGN;
+	ptr = (ulong)packet;
+
+	return ptr >= start && ptr < end;
+}
+
+static int airoha_rx_stash_pop(struct airoha_gdm_port *port, uchar **packetp)
+{
+	uchar *packet;
+	u16 length;
+
+	if (!port->rx_stash_count)
+		return -EAGAIN;
+
+	packet = port->rx_stash + port->rx_stash_tail * PKTSIZE_ALIGN;
+	length = port->rx_stash_len[port->rx_stash_tail];
+	port->rx_stash_tail = (port->rx_stash_tail + 1) %
+			      AIROHA_RX_STASH_DEPTH;
+	port->rx_stash_count--;
+
+	*packetp = packet;
+
+	return length;
+}
+
+static int airoha_rx_stash_push(struct airoha_gdm_port *port, uchar *packet,
+				u16 length)
+{
+	uchar *stash;
+
+	if (!port->rx_stash)
+		return -ENOMEM;
+
+	if (length > PKTSIZE_ALIGN)
+		return -EMSGSIZE;
+
+	if (port->rx_stash_count >= AIROHA_RX_STASH_DEPTH)
+		return -ENOSPC;
+
+	stash = port->rx_stash + port->rx_stash_head * PKTSIZE_ALIGN;
+	memcpy(stash, packet, length);
+	port->rx_stash_len[port->rx_stash_head] = length;
+	port->rx_stash_head = (port->rx_stash_head + 1) %
+			      AIROHA_RX_STASH_DEPTH;
+	port->rx_stash_count++;
+
+	return 0;
+}
+
 static int airoha_eth_recv(struct udevice *dev, int flags, uchar **packetp)
 {
 	struct airoha_gdm_port *port = dev_get_priv(dev);
+	struct airoha_gdm_port *rx_port;
 	struct airoha_qdma *qdma = port->qdma;
 	struct airoha_qdma_desc *desc;
 	struct airoha_queue *q;
 	u16 length;
-	int qid;
+	u32 rxmsg1;
+	u8 sport;
+	int qid, ret;
+
+	ret = airoha_rx_stash_pop(port, packetp);
+	if (ret != -EAGAIN)
+		return ret;
 
 	qid = 0;
 	q = &qdma->q_rx[qid];
@@ -1283,14 +1398,23 @@ static int airoha_eth_recv(struct udevice *dev, int flags, uchar **packetp)
 	dma_unmap_single(desc->addr, length,
 			 DMA_FROM_DEVICE);
 
-	if (port->has_xsi_src_port) {
-		u32 rxmsg1 = le32_to_cpu(READ_ONCE(desc->msg1));
-		u8 sport = FIELD_GET(QDMA_ETH_RXMSG_SPORT_MASK, rxmsg1);
+	rxmsg1 = le32_to_cpu(READ_ONCE(desc->msg1));
+	sport = FIELD_GET(QDMA_ETH_RXMSG_SPORT_MASK, rxmsg1);
 
-		if (sport != port->xsi_src_port) {
-			airoha_qdma_release_rx_desc(qdma, q, qid);
-			return -EAGAIN;
-		}
+	rx_port = airoha_rx_find_xsi_port(qdma->eth, sport);
+	if (rx_port && rx_port != port) {
+		ret = airoha_rx_stash_push(rx_port, phys_to_virt(desc->addr),
+					   length);
+		if (ret)
+			debug("%s: failed to stash RX packet for SPORT %#x: %d\n",
+			      dev->name, sport, ret);
+		airoha_qdma_release_rx_desc(qdma, q, qid);
+		return -EAGAIN;
+	}
+
+	if (port->has_xsi_src_port && sport != port->xsi_src_port) {
+		airoha_qdma_release_rx_desc(qdma, q, qid);
+		return -EAGAIN;
 	}
 
 	*packetp = phys_to_virt(desc->addr);
@@ -1306,6 +1430,9 @@ static int arht_eth_free_pkt(struct udevice *dev, uchar *packet, int length)
 	int qid;
 
 	if (!packet)
+		return 0;
+
+	if (airoha_rx_packet_is_stashed(port, packet))
 		return 0;
 
 	qid = 0;
