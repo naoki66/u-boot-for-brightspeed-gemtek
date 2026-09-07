@@ -148,16 +148,18 @@ __pycache__
 /compile_commands.json
 
 #
-# XG2010G local backup / signing artifacts
+# Local signing / backup artifacts — never commit keys or certificates.
 #
-*.cert
-*.crt
-*.csr
-*.der
-*.fip
-*.key
-*.p12
-*.pfx
+# Path-qualified on purpose: a global *.crt / *.key / *.der rule would also
+# hide the key material U-Boot keeps in-tree (K3 keys, capsule update test
+# keys, mbedTLS test data), which then silently drops out of a rebase.
+#
+/signing/
+/certs/
+/certificates/
+/keys/
+/out/
+/build-output/
 DUMPTMP/
 mtd*.dump
 original-device-backup-*/
