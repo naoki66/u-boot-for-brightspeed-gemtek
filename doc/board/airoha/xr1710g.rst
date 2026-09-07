@@ -1,0 +1,160 @@
+XR1710G U-Boot
+==============
+
+本文档记录 XR1710G 的 U-Boot 板级配置、启动链和与 XG2010G 的硬件差异。
+XR1710G 使用 Airoha AN7581 类 SoC，与 XG2010G 共用同一份
+``board/airoha/an7581`` 板级支持代码；差异通过设备树
+``arch/arm/dts/xr1710g.dts`` 表达。
+
+.. note::
+   关于启动链、BL2/BL31 与 Trusted Boot、NAND 分区、刷写边界和 X 模式
+   救砖等通用流程，请先阅读 :doc:`xg2010g`，本文档仅描述 XR1710G 专属
+   差异。
+
+安全提醒
+--------
+
+与 :doc:`xg2010g` 相同：
+
+* 刷写 bootloader 或 NAND 前必须准备完整原厂备份，并确认 NAND 型号、
+  容量、页大小、擦除块大小、ECC/OOB 方式和 BootROM 镜像格式完全匹配。
+* ``board/airoha/<board>/firmware`` 下只保留明确记录 SHA256 的最小启动
+  输入，不得提交完整原厂 mtd0、Trusted Boot 私钥或工厂校准数据。
+
+硬件差异
+--------
+
+XR1710G 与 XG2010G 的硬件差异要点（依据实测可用的 XR1710G-http-uboot
+chainloader 与 ImmortalWrt ``an7581-xr1710g-ubi.dts``）：
+
+* **DRAM：2 GiB DDR**（XG2010G 为 1 GiB）。EN7581 SDK 的 DDR 训练由 BL2
+  完成；本项目沿用 XG2010G 的 BL2 训练表与 ``sdram_conf`` 兼容字段。
+* **面板状态灯 sts 红/绿/蓝/白** 位于统一 ``en7581_pinctrl`` 的
+  GPIO 29/17/19/20（低有效），与 XG2010G 的 43/44/45/33 不同。
+* **两个外部 Realtek PHY**（phy5/phy8）与 XG2010G 一样挂在 FE MDIO
+  （``airoha,arht-mdio``），不在交换芯片 MDIO 上；phy5 复位 GPIO 为 46，
+  phy8 复位 GPIO 为 31，均为低有效，且需要 ``realtek,pnswap-tx/rx``
+  极性交换。
+* **交换芯片** 保持原生端口映射（内部 PHY 9/10），本仓库 U-Boot 的
+  switch 自动轮询窗口固定为 8..12，刚好覆盖 9/10 与 XG2010G 的 12。
+* **gdm 端口绑定**：
+
+  * ``gdm4`` 通过 USXGMII 连接 phy5；
+  * ``gdm2`` 通过 USXGMII 连接 phy8；
+  * ``gdm1`` 仍为交换芯片 CPU 口，LAN1/LAN2 两个网口由内部交换口提供。
+
+* **LAN1/LAN2 网口绿/黄灯** 是软件 GPIO（绿 43/44、黄 33/34，低有效），
+  恢复页按链路速度点亮：千兆亮绿灯、10/100M 亮黄灯、有流量时 100ms
+  周期闪烁；XG2010G 的 LAN4 口绿/黄灯（46/42）同理。
+* **MDIO 引脚组** 额外包含 ``gpio2`` 输出高电平的 conf，与 ImmortalWrt
+  板级 DTS 和 chainloader 保持一致。
+* **RESET 键** 同为 ``en7581_pinctrl`` GPIO 0，低有效，Recovery 行为与
+  XG2010G 完全一致。
+
+NAND 分区
+---------
+
+与 XG2010G 共用同一份 512 MiB NAND 布局，请参阅
+:doc:`xg2010g` 中 *NAND 分区* 一节。本项目对 XR1710G 使用同样的
+``bootloader``/``uenv``/``dsd``/``ubi``/``reserved_bmt`` 边界，UBI 重建
+流程与坏块处理也完全相同。
+
+``board/airoha/an7581`` 的板级初始化会自动清理原厂
+``ubi.mtd=system/tclinux*`` 和 ``root=/dev/mtdblock*`` 参数，避免 Linux
+误挂载原厂分区。
+
+bootargs 参数
+-------------
+
+XR1710G 的 ``board/airoha/an7581/xr1710g.env`` 只保留最小命令行：
+
+.. code-block:: text
+
+   console=ttyS0,115200n8 earlycon ubi.block=0,fit root=/dev/fit0 rootwait rdinit=/sbin/init
+
+XG2010G env 中额外的 ``onu_type``、``qdma_init``、``serdes_*``、
+``*_gpio`` 等 Airoha 字段对 XR1710G 当前未做实机校核，**默认不写入
+bootargs**。如确需追加，应在原厂 TTL 输出确认后再补，并在
+``xr1710g.env`` 中保留显式注释，方便后续校核。
+
+字段含义与十六进制解读请参阅 :doc:`xg2010g` 中 *bootargs 参数说明*。
+
+U-Boot 配置
+-----------
+
+构建配置为 ``configs/xr1710g_defconfig``，它与 ``xg2010g_defconfig`` 的
+差异仅为：
+
+* ``CONFIG_LOCALVERSION="-xr1710g"``；
+* ``CONFIG_DEFAULT_DEVICE_TREE="xr1710g"``；
+* ``CONFIG_DEFAULT_FDT_FILE="xr1710g"``；
+* ``CONFIG_ENV_SOURCE_FILE="xr1710g"``。
+
+其余 AN7581 / Airoha PHY / ``HTTPD_RECOVERY`` / ``NET_LWIP`` 等配置
+完全一致。板级 DTS 维护在 ``arch/arm/dts/xr1710g.dts``，板级 compatible
+为 ``gemtek,xr1710g(-ubi)`` 与 ``econet,xr1710g(-ubi)``。
+
+GitHub Actions 签名构建
+-----------------------
+
+``.github/workflows/build-mtd0.yml`` 在 GitHub Actions 上以 matrix 方式
+同时编译两板。XR1710G 的所有 GitHub Variables 与 Secrets 必须以
+``XR1710G_*`` 前缀命名，CI 在签名步骤会按 ``${BOARD_UPPER}_*`` 解析。
+每块板的签名输入与已签名 ``mtd0`` 严格区分：
+
+* ``XR1710G_TB_PRIVATE_KEY`` 或 ``XR1710G_TB_PRIVATE_KEY_B64``：Trusted
+  Boot 私钥。
+* ``XR1710G_MTD0_PREFIX_B64`` 或 ``XR1710G_MTD0_PREFIX_URL``（可选）：
+  mtd0 前导区二进制；优先于 ``board/airoha/xr1710g/firmware/mtd0-prefix.bin``
+  的内嵌副本。
+* ``XR1710G_MTD0_PREFIX_SHA256``（推荐）：前导区 SHA256 校验值。
+* ``XR1710G_MTD0_SIZE``/``XR1710G_FIP_OFFSET``/``XR1710G_FIP_ALIGN``
+  /``XR1710G_TFW_NVCTR``/``XR1710G_NTFW_NVCTR``（可选）：非敏感变量，
+  默认值见 workflow 内 ``DEFAULT_*``。
+
+.. warning::
+   XG2010G 与 XR1710G 的 mtd0 前导区是 **板级 BootROM 专属** 的字节段，
+   二者不可互换。CI 拒绝跨板降级：若 ``XR1710G_*`` 前导区未配置且
+   ``board/airoha/xr1710g/firmware/mtd0-prefix.bin`` 也缺失，构建会
+   直接报错而不会回落到 XG2010G 的资源。
+
+X 模式救砖与 Web Recovery
+------------------------
+
+流程与 :doc:`xg2010g` 完全一致，仅下列与硬件相关的细节差异：
+
+* **Web Recovery 网口**：XR1710G 的两个恢复网口均指向 FE MDIO 上的
+  phy5/phy8（``net/lwip/httpd_recovery.c`` 按板区分）。建议使用 LAN1 或
+  LAN2 任一口（gdm4 / gdm2 USXGMII）。
+* **状态灯**：恢复页运行期间 sts 红/绿/蓝/白做呼吸跑马灯，使用 GPIO
+  29/17/19/20（低有效）。启动日志应出现 ``Recovery status LEDs:
+  gpio29(L) gpio17(L) gpio19(L) gpio20(L)``。若某盏灯明暗相反，把
+  该灯的 ``GPIO_ACTIVE_LOW`` 改为 ``GPIO_ACTIVE_HIGH``。
+* **RESET 键**：仍为 GPIO 0，低有效，行为与 XG2010G 完全一致。
+
+恢复网页资源
+------------
+
+与 :doc:`xg2010g` 共用同一份恢复页面资源（``lib/lwip/httpd/htdocs_recovery/``
+及 ``scripts/ci/bootext-bl2.py`` 等），页面里不写死板型；型号由恢复
+服务器 ``/about`` 端点的 ``board`` 字段在运行时注入。修改 HTML 后执行：
+
+.. code-block:: console
+
+   python3 lib/lwip/httpd/makefsdata.py
+
+重新生成 ``fsdata_recovery.c``，两板共用同一份产物。
+
+建议的验证顺序
+--------------
+
+.. code-block:: console
+
+   make CROSS_COMPILE=aarch64-linux-gnu- xr1710g_defconfig
+   make CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)
+
+构建得到的 ``u-boot.bin`` 仅是 BL33 候选文件，需要按
+:doc:`xg2010g` 中 *BL2、BL31 与 Trusted Boot Key* 与 *GitHub Actions
+签名构建* 的流程封装为可刷写 ``mtd0`` 镜像。XR1710G 的 BL2/BL31 与
+Airoha NAND 启动补丁当前共用 ``board/airoha/xg2010g/atf/`` 下的脚本，
+未来若 XR1710G 出现独立补丁，应迁至 ``board/airoha/an7581/atf/``。

@@ -7,3 +7,4 @@ Airoha
    :maxdepth: 2
 
    xg2010g
+   xr1710g

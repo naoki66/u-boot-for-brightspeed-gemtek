@@ -1,9 +1,17 @@
-name: Build signed mtd0 bootloader 
+name: Build signed mtd0 bootloader
 
 on:
   push:
     branches:
       - "**"
+    paths-ignore:
+      - ".workbuddy/**"
+      - "doc/**"
+      - "README.md"
+      - "LICENSE*"
+      - "**/*.md"
+      - "**/*.rst"
+      - "**/*.svg"
   workflow_dispatch:
     inputs:
       board:
@@ -25,6 +33,11 @@ on:
           - pre-release
           - release
 
+concurrency:
+  # Replace any in-progress build for the same ref/board with the new one.
+  group: build-mtd0-${{ github.workflow }}-${{ github.ref }}-${{ matrix.board }}
+  cancel-in-progress: true
+
 env:
   ARCH: arm
   AIROHA_ATF_REF: 94892b9e42eb1f6992e60bce904c3ef42ea995c8
@@ -36,9 +49,6 @@ env:
   BL23_FIP_MAX_SIZE: "0x100000"
   BL33_LOAD_MAX_SIZE: "0x100000"
   BL_DECOMPRESS_INPUT_MAX_SIZE: "0x58000"
-  # Only the immutable mtd0 prefix remains in-tree; BL2/BL31 are built online.
-  BUNDLED_ASSET_DIR: board/airoha/xg2010g/firmware
-  BUNDLED_MTD0_PREFIX_SHA256: 82830140f4f8842702d0569065c27071b7cc24e0876e6c487cb4d9d81c294dd7
   CROSS_COMPILE: aarch64-linux-gnu-
   DEFAULT_FIP_ALIGN: "0x400"
   DEFAULT_FIP_OFFSET: "0x800"
@@ -135,16 +145,34 @@ jobs:
           echo "value=$MODE" >> "$GITHUB_OUTPUT"
           echo "Build mode: $MODE"
 
-      - name: Resolve build parameters
-        id: params
+      # Per-board parameters live under the upper-cased board name so that the
+      # same workflow handles both XG2010G and XR1710G. Each board must
+      # provide a matching ${BOARD_UPPER}_* set of GitHub Variables/Secrets
+      # (see doc/board/airoha/xg2010g.rst and xr1710g.rst for the full list).
+      # This step also pre-computes board_upper so that all later steps can
+      # reference it via ${{ steps.board_ids.outputs.board_upper }}.
+      - name: Record board identifier
+        id: board_ids
         env:
-          VAR_FIP_ALIGN: ${{ vars.XG2010G_FIP_ALIGN }}
-          VAR_FIP_OFFSET: ${{ vars.XG2010G_FIP_OFFSET }}
-          VAR_MTD0_SIZE: ${{ vars.XG2010G_MTD0_SIZE }}
-          VAR_NTFW_NVCTR: ${{ vars.XG2010G_NTFW_NVCTR }}
-          VAR_TFW_NVCTR: ${{ vars.XG2010G_TFW_NVCTR }}
+          BOARD: ${{ matrix.board }}
         run: |
           set -euo pipefail
+          board_upper=$(printf '%s' "$BOARD" | tr '[:lower:]' '[:upper:]')
+          echo "board_upper=${board_upper}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve per-board identifiers and parameters
+        id: params
+        env:
+          BOARD: ${{ matrix.board }}
+          VAR_FIP_ALIGN: ${{ vars[steps.board_ids.outputs.board_upper + '_FIP_ALIGN'] }}
+          VAR_FIP_OFFSET: ${{ vars[steps.board_ids.outputs.board_upper + '_FIP_OFFSET'] }}
+          VAR_MTD0_SIZE: ${{ vars[steps.board_ids.outputs.board_upper + '_MTD0_SIZE'] }}
+          VAR_NTFW_NVCTR: ${{ vars[steps.board_ids.outputs.board_upper + '_NTFW_NVCTR'] }}
+          VAR_TFW_NVCTR: ${{ vars[steps.board_ids.outputs.board_upper + '_TFW_NVCTR'] }}
+        run: |
+          set -euo pipefail
+          board_upper="${{ steps.board_ids.outputs.board_upper }}"
+
           tfa_ref="$FIXED_TFA_REF"
 
           mtd0_size="${VAR_MTD0_SIZE:-$DEFAULT_MTD0_SIZE}"
@@ -157,7 +185,7 @@ jobs:
           fip_offset_dec=$((fip_offset))
           fip_align_dec=$((fip_align))
           if (( mtd0_size_dec != 0x200000 )); then
-            echo "XG2010G mtd0 must stay 0x200000 bytes, got ${mtd0_size}" >&2
+            echo "${board_upper} mtd0 must stay 0x200000 bytes, got ${mtd0_size}" >&2
             exit 1
           fi
           if (( fip_offset_dec < 0 || fip_offset_dec >= mtd0_size_dec )); then
@@ -180,6 +208,7 @@ jobs:
             echo "ntfw_nvctr=${ntfw_nvctr}"
           } >> "$GITHUB_OUTPUT"
 
+          echo "Board: ${BOARD} (${board_upper})"
           echo "TF-A ref: ${tfa_ref} (fixed)"
           echo "mtd0 size: ${mtd0_size}"
           echo "FIP offset: ${fip_offset}"
@@ -292,6 +321,11 @@ jobs:
           ref: ${{ env.MBEDTLS_REF }}
           path: mbedtls-3.4.1
 
+      # prepare-atf.py currently lives under xg2010g/atf/. It applies SoC-level
+      # patches to Airoha's TF-A tree that are required for both boards, so it
+      # is reused as a shared platform helper until an xr1710g/atf/ directory
+      # exists. Move it to board/airoha/an7581/atf/ once XR1710G-specific
+      # patches diverge.
       - name: Prepare Airoha TF-A source and host tools
         run: |
           set -euo pipefail
@@ -327,51 +361,29 @@ jobs:
 
           # BL2 先把 BL33 载荷读入固定解压缓冲区，再展开到最终执行地址。
           "$LZMA" e u-boot.bin out/atf/bl33.bin
-          python3 - <<'PY'
-          import os
-          import struct
-          from pathlib import Path
-
-          raw = Path("u-boot.bin").read_bytes()
-          payload = Path("out/atf/bl33.bin").read_bytes()
-          if len(payload) < 13:
-              raise SystemExit("BL33 LZMA payload is truncated")
-
-          # Airoha's decoder consumes the classic LZMA-Alone header:
-          # 5-byte properties followed by an 8-byte little-endian size.
-          declared_size = struct.unpack_from("<Q", payload, 5)[0]
-          if declared_size != len(raw):
-              raise SystemExit(
-                  f"BL33 LZMA size header is {declared_size} bytes; "
-                  f"u-boot.bin is {len(raw)} bytes"
-              )
-
-          limit = int(os.environ["BL_DECOMPRESS_INPUT_MAX_SIZE"], 0)
-          if len(payload) > limit:
-              raise SystemExit(
-                  f"BL33 payload is {len(payload)} bytes; "
-                  f"BL2 input buffer is {limit} bytes"
-              )
-          print(
-              f"BL33 LZMA payload: {len(payload)} bytes "
-              f"(decompresses to {declared_size} bytes)"
-          )
-          PY
+          python3 scripts/ci/validate-bl33.py --raw u-boot.bin --payload out/atf/bl33.bin
           ls -la out/atf/bl2.bin out/atf/bl31.bin out/atf/bl33.bin
 
       - name: Prepare signing inputs
         id: signing
         env:
+          BOARD: ${{ matrix.board }}
+          BOARD_UPPER: ${{ steps.board_ids.outputs.board_upper }}
           FIP_OFFSET_DEC: ${{ steps.params.outputs.fip_offset_dec }}
-          MTD0_PREFIX_B64: ${{ secrets.XG2010G_MTD0_PREFIX_B64 }}
-          MTD0_PREFIX_SHA256: ${{ vars.XG2010G_MTD0_PREFIX_SHA256 }}
-          MTD0_PREFIX_URL: ${{ secrets.XG2010G_MTD0_PREFIX_URL || vars.XG2010G_MTD0_PREFIX_URL }}
-          TB_PRIVATE_KEY: ${{ secrets.XG2010G_TB_PRIVATE_KEY }}
-          TB_PRIVATE_KEY_B64: ${{ secrets.XG2010G_TB_PRIVATE_KEY_B64 }}
+          MTD0_PREFIX_B64: ${{ secrets[steps.board_ids.outputs.board_upper + '_MTD0_PREFIX_B64'] }}
+          MTD0_PREFIX_SHA256: ${{ vars[steps.board_ids.outputs.board_upper + '_MTD0_PREFIX_SHA256'] }}
+          MTD0_PREFIX_URL: ${{ secrets[steps.board_ids.outputs.board_upper + '_MTD0_PREFIX_URL'] || vars[steps.board_ids.outputs.board_upper + '_MTD0_PREFIX_URL'] }}
+          TB_PRIVATE_KEY: ${{ secrets[steps.board_ids.outputs.board_upper + '_TB_PRIVATE_KEY'] }}
+          TB_PRIVATE_KEY_B64: ${{ secrets[steps.board_ids.outputs.board_upper + '_TB_PRIVATE_KEY_B64'] }}
         run: |
           set -euo pipefail
           mkdir -p signing certs out
           missing=()
+
+          # The vendor mtd0 prefix is per-board BootROM-specific; never share
+          # XG2010G's prefix with XR1710G. Refuse to fall back to any other
+          # board's bundled asset and fail loudly if nothing is configured.
+          BUNDLED_ASSET_DIR="board/airoha/${BOARD}/firmware"
 
           restore_binary() {
             local label="$1"
@@ -417,7 +429,7 @@ jobs:
           Path("signing/tb_key.pem").write_text(key + "\n", encoding="ascii", newline="\n")
           PY
           else
-            missing+=("XG2010G_TB_PRIVATE_KEY")
+            missing+=("${BOARD_UPPER}_TB_PRIVATE_KEY or ${BOARD_UPPER}_TB_PRIVATE_KEY_B64")
           fi
 
           if [ -f signing/tb_key.pem ]; then
@@ -428,10 +440,20 @@ jobs:
           cp out/atf/bl2.bin signing/bl2.bin
           cp out/atf/bl31.bin signing/bl31.bin
           if [ -n "$MTD0_PREFIX_B64$MTD0_PREFIX_URL" ]; then
-            restore_binary "mtd0 prefix" "$MTD0_PREFIX_B64" "$MTD0_PREFIX_URL" signing/mtd0-prefix.bin "$MTD0_PREFIX_SHA256" || missing+=("XG2010G_MTD0_PREFIX_B64 or XG2010G_MTD0_PREFIX_URL")
-          else
+            restore_binary "mtd0 prefix" "$MTD0_PREFIX_B64" "$MTD0_PREFIX_URL" signing/mtd0-prefix.bin "$MTD0_PREFIX_SHA256" \
+              || missing+=("${BOARD_UPPER}_MTD0_PREFIX_B64 or ${BOARD_UPPER}_MTD0_PREFIX_URL")
+          elif [ -f "${BUNDLED_ASSET_DIR}/mtd0-prefix.bin" ]; then
             cp "${BUNDLED_ASSET_DIR}/mtd0-prefix.bin" signing/mtd0-prefix.bin
-            printf '%s  %s\n' "$BUNDLED_MTD0_PREFIX_SHA256" signing/mtd0-prefix.bin | sha256sum -c -
+            # Bundled prefixes ship with a ${BOARD_UPPER}_MTD0_PREFIX_SHA256
+            # variable too; if it is missing we trust the bundled file and
+            # only warn.
+            if [ -n "$MTD0_PREFIX_SHA256" ]; then
+              printf '%s  %s\n' "$MTD0_PREFIX_SHA256" signing/mtd0-prefix.bin | sha256sum -c -
+            else
+              echo "warning: ${BOARD_UPPER}_MTD0_PREFIX_SHA256 not set; trusting bundled mtd0-prefix.bin" >&2
+            fi
+          else
+            missing+=("${BOARD_UPPER}_MTD0_PREFIX_B64 / ${BOARD_UPPER}_MTD0_PREFIX_URL / ${BUNDLED_ASSET_DIR}/mtd0-prefix.bin")
           fi
 
           if [ -f signing/mtd0-prefix.bin ]; then
@@ -456,6 +478,7 @@ jobs:
       - name: Generate Trusted Boot certificates and FIP
         if: ${{ steps.signing.outputs.ready == 'true' }}
         env:
+          BOARD: ${{ matrix.board }}
           FIP_ALIGN: ${{ steps.params.outputs.fip_align }}
           NTFW_NVCTR: ${{ steps.params.outputs.ntfw_nvctr }}
           TFW_NVCTR: ${{ steps.params.outputs.tfw_nvctr }}
@@ -504,15 +527,15 @@ jobs:
             --tb-fw-cert certs/tb_fw.crt \
             --soc-fw-cert certs/soc_fw.crt \
             --nt-fw-cert certs/nt_fw.crt \
-            out/fip-${{ matrix.board }}-signed.bin
+            out/fip-${BOARD}-signed.bin
 
-          "$FIPTOOL" info out/fip-${{ matrix.board }}-signed.bin | tee out/fip-info.txt
+          "$FIPTOOL" info out/fip-${BOARD}-signed.bin | tee out/fip-info.txt
           "$FIPTOOL" unpack --force \
             --nt-fw out/fip-bl33-check.bin \
-            out/fip-${{ matrix.board }}-signed.bin
+            out/fip-${BOARD}-signed.bin
           cmp out/fip-bl33-check.bin out/atf/bl33.bin
           rm -f out/fip-bl33-check.bin
-          check_fip_size out/fip-${{ matrix.board }}-signed.bin "$((BL23_FIP_MAX_SIZE))"
+          check_fip_size out/fip-${BOARD}-signed.bin "$((BL23_FIP_MAX_SIZE))"
 
           # X 模式第一阶段需要同时携带 BL2 与 tb-fw 证书。
           "$FIPTOOL" create \
@@ -548,39 +571,9 @@ jobs:
           # 应急 bootext 垫片：给 BL2 加 BootROM XMODEM 加载头，格式对照原厂
           # bootext.ram（magic 0xAA640001/0x12345678 + BL2 UUID + 载荷偏移/大小，
           # 其余补零；0x38 校验区原厂非零，但 ImmortalWrt 为零可用，这里取零）。
-          python3 - <<'PY'
-          import hashlib
-          from pathlib import Path
-
-          HEADER_SIZE = 0x400
-          MAGIC0 = 0xAA640001
-          MAGIC1 = 0x12345678
-          BL2_UUID = bytes.fromhex("5ff9ec0b4d223e4da544c39d81c73f0a")
-          reset_vector = bytes.fromhex("0090a0e101a0a0e102b0a0e103c0a0e1")
-
-          bl2 = Path("signing/bl2.bin").read_bytes()
-          if bl2[:16] != reset_vector:
-              raise SystemExit(
-                  "unexpected BL2 entry code, expected AArch32 reset vector:\n"
-                  f"  got  {bl2[:16].hex()}\n  want {reset_vector.hex()}"
-              )
-          total = HEADER_SIZE + len(bl2)
-          if total > 0x1FC00:
-              raise SystemExit(
-                  f"headered BL2 too large: {total} > 0x1FC00 (vendor bootext.ram size)"
-              )
-
-          header = bytearray(HEADER_SIZE)
-          header[0:4] = MAGIC0.to_bytes(4, "little")
-          header[4:8] = MAGIC1.to_bytes(4, "little")
-          header[0x10:0x20] = BL2_UUID
-          header[0x20:0x24] = HEADER_SIZE.to_bytes(4, "little")
-          header[0x28:0x2C] = len(bl2).to_bytes(4, "little")
-          out = Path("out/bootext-bl2.bin")
-          out.write_bytes(bytes(header) + bl2)
-          print(f"bootext-bl2 bytes: {total}")
-          print(f"bootext-bl2 sha256: {hashlib.sha256(out.read_bytes()).hexdigest()}")
-          PY
+          python3 scripts/ci/bootext-bl2.py \
+            --bl2 signing/bl2.bin \
+            --output out/bootext-bl2.bin
           test -s out/bootext-bl2.bin
 
       - name: Compose 2 MiB mtd0 image
@@ -591,32 +584,10 @@ jobs:
           MTD0_SIZE: ${{ steps.params.outputs.mtd0_size }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import hashlib
-          import os
-          from pathlib import Path
-
-          mtd0_size = int(os.environ["MTD0_SIZE"], 0)
-          fip_offset = int(os.environ["FIP_OFFSET"], 0)
-          prefix = Path("signing/mtd0-prefix.bin").read_bytes() if fip_offset else b""
-          fip = Path("out/fip-%s-signed.bin" % os.environ["BOARD"]).read_bytes()
-
-          if len(prefix) != fip_offset:
-              raise SystemExit(f"prefix size {len(prefix)} != FIP offset {fip_offset}")
-          if fip_offset + len(fip) > mtd0_size:
-              raise SystemExit(f"signed FIP exceeds mtd0: end={fip_offset + len(fip)} size={mtd0_size}")
-
-          mtd0 = bytearray(b"\xff" * mtd0_size)
-          mtd0[:fip_offset] = prefix
-          mtd0[fip_offset:fip_offset + len(fip)] = fip
-          out = Path("out/mtd0-bootloader-%s-signed.bin" % os.environ["BOARD"])
-          out.write_bytes(mtd0)
-          print(f"mtd0 bytes: {len(mtd0)}")
-          print(f"fip offset: 0x{fip_offset:x}")
-          print(f"fip bytes: {len(fip)}")
-          print(f"fip end: 0x{fip_offset + len(fip):x}")
-          print(f"mtd0 sha256: {hashlib.sha256(mtd0).hexdigest()}")
-          PY
+          python3 scripts/ci/compose-mtd0.py \
+            --prefix signing/mtd0-prefix.bin \
+            --fip "out/fip-${BOARD}-signed.bin" \
+            --output "out/mtd0-bootloader-${BOARD}-signed.bin"
           test "$(stat -c%s "out/mtd0-bootloader-${BOARD}-signed.bin")" = "${{ steps.params.outputs.mtd0_size_dec }}"
 
       - name: Prepare artifacts
@@ -626,6 +597,7 @@ jobs:
           ATF_BUILD_BASE_REF: ${{ env.ATF_BASE_REF }}
           BL2_BUILD_TOOLCHAIN: ${{ env.BL2_TOOLCHAIN_NAME }}
           BOARD: ${{ matrix.board }}
+          BOARD_UPPER: ${{ steps.board_ids.outputs.board_upper }}
           BUILD_MODE: ${{ steps.mode.outputs.value }}
           COMMIT_SHORT: ${{ steps.version.outputs.commit }}
           DATE_STAMP: ${{ steps.version.outputs.date }}
@@ -678,7 +650,7 @@ jobs:
           cp out/ubi-preloader-fip-info.txt "build-output/${board}-ubi-preloader-fip-info.txt"
           cp out/ubi-bl31-uboot-fip-info.txt "build-output/${board}-ubi-bl31-uboot-fip-info.txt"
           {
-            echo "Board: ${board}"
+            echo "Board: ${board} (${BOARD_UPPER})"
             echo "Build date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "Repository: ${GITHUB_REPOSITORY}"
             echo "Ref: ${GITHUB_REF_NAME}"

@@ -444,7 +444,8 @@ artifact：
 * 将 FIP 写入 2 MiB mtd0 镜像中的 ``0x800`` 偏移，前导区保持原厂内容，
   其余尾部填充 ``0xff``。
 
-默认仓库变量如下：
+默认仓库变量（每板各自一份，以 ``${BOARD_UPPER}_*`` 命名；XG2010G 见
+下表，XR1710G 见 :doc:`xr1710g`）如下：
 
 .. list-table::
    :header-rows: 1
@@ -473,20 +474,23 @@ artifact：
 
 TF-A 工具版本固定在 workflow 内的 ``FIXED_TFA_REF=v2.13.0``，用于构建
 ``fiptool`` 和 ``cert_create``。手动运行 Actions 时不再提供 TF-A ref 输入，
-也不再读取 ``XG2010G_TFA_REF`` 变量，避免误填不同 TF-A 版本导致 FIP/证书
-产物不可复现。
+也**不再读取 ``XG2010G_TFA_REF`` 这类板级 TFA 变量**，避免误填不同 TF-A
+版本导致 FIP/证书产物不可复现。如确实需要自定义 TFA 源，请直接 fork
+workflow 并修改 ``FIXED_TFA_REF``。
 
 BL2/BL31 使用 TF-A ``v2.10`` 基线、Airoha overlay
 ``94892b9e42eb1f6992e60bce904c3ef42ea995c8`` 和 Mbed TLS
 ``72718dd87e087215ce9155a826ee5a66cfbe9631`` 构建。
 
-默认构建只需要设置签名私钥 Secret：
+默认构建只需要设置签名私钥 Secret（XR1710G 同理，对应
+``XR1710G_TB_PRIVATE_KEY``）：
 
 .. code-block:: console
 
    gh secret set XG2010G_TB_PRIVATE_KEY --repo naoki66/u-boot-for-brightspeed-gemtek < private_key.pem
 
-如需覆盖 mtd0 前导区，可设置对应 Secret 和校验变量：
+如需覆盖 mtd0 前导区，可设置对应 Secret 和校验变量。前导区是板级
+BootROM 专属字节段，XG2010G 与 XR1710G 的资源不可互换：
 
 .. code-block:: console
 
@@ -643,3 +647,20 @@ Recovery 的端口/PHY 映射在 ``net/lwip/httpd_recovery.c`` 中按板区分�
 XG2010G 使用 FE/switch 混合映射，XR1710G 两个恢复网口均指向 FE MDIO
 上的 phy5/phy8。两板的 Web Recovery 地址、无痕模式要求和 UBI 重建流程
 相同。
+
+恢复网页资源
+------------
+
+恢复页面的源文件在 ``lib/lwip/httpd/htdocs_recovery/``，编译前需要先打包成
+``lib/lwip/httpd/fsdata_recovery.c``：
+
+.. code-block:: console
+
+    python3 lib/lwip/httpd/makefsdata.py
+
+源文件与生成的 ``fsdata_recovery.c`` 要一起提交。只改 HTML 而不重新生成，
+设备上看到的仍然是旧页面。
+
+页面里不写死板型。型号由恢复服务器通过 ``/about`` 端点的 ``board`` 字段
+给出（取自 ``CONFIG_DEFAULT_DEVICE_TREE``），前端在运行时注入，因此几块板
+可以共用同一份页面资源，不会出现 XR1710G 显示 XG2010G 的情况。
