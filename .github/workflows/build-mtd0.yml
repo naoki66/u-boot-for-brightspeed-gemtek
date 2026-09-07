@@ -477,13 +477,16 @@ jobs:
           if [ -n "$TB_PRIVATE_KEY_B64" ]; then
             printf '%s' "$TB_PRIVATE_KEY_B64" | base64 -d > signing/tb_key.pem
           elif [ -n "$TB_PRIVATE_KEY" ]; then
+            export TB_PRIVATE_KEY
             python3 - <<'PY'
           import os
           import re
           import textwrap
           from pathlib import Path
 
-          key = os.environ["TB_PRIVATE_KEY"].replace("\\n", "\n").strip()
+          key = os.environ.get("TB_PRIVATE_KEY", "").replace("\\n", "\n").strip()
+          if not key:
+              raise SystemExit("TB_PRIVATE_KEY is set in shell but was not passed to Python")
           begin = "-----BEGIN PRIVATE KEY-----"
           end = "-----END PRIVATE KEY-----"
           if begin in key and end in key and "\n" not in key:
@@ -531,20 +534,8 @@ jobs:
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "Missing signing inputs:" >&2
             printf '  - %s\n' "${missing[@]}" >&2
-            if [ "${GITHUB_EVENT_NAME:-push}" = "workflow_dispatch" ]; then
-              # Manual release runs MUST be signed.  Refuse to publish an
-              # unsigned mtd0 image; force the operator to configure the
-              # missing vars/secrets and re-run.
-              echo "::error::Refusing to publish a release without signing inputs. Set the missing vars/secrets in repo settings and re-run, or supply an mtd0-prefix URL/B64." >&2
-              exit 1
-            fi
-            # Push-triggered runs are for toolchain validation.  Skip the
-            # signing-dependent steps instead of failing the run, so a
-            # missing secret does not block every code change.
-            echo "::warning::Signing skipped on push because the above vars/secrets/bundled assets are missing in this repository." >&2
-            echo "::warning::Build artifacts (u-boot.bin, bl2.bin, bl31.bin) are still produced for toolchain validation but no signed FIP/mtd0 is uploaded." >&2
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "::error::Signing inputs are required for all build modes, including test. Set the missing vars/secrets in repo settings and re-run, or supply an mtd0-prefix URL/B64." >&2
+            exit 1
           fi
 
           for image in signing/bl2.bin signing/bl31.bin signing/mtd0-prefix.bin; do
