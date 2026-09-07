@@ -40,9 +40,9 @@ FIP，而不是只有 BL33 的裸 U-Boot。
 BL2、BL31 和 Trusted Boot Key
 -----------------------------
 
-BL2 负责早期硬件与 DDR 初始化，BL31 提供 EL3 运行时环境。本项目使用固定版本
-的 TF-A ``v2.10``、Airoha AN7581 overlay、Mbed TLS 和 Arm GNU Toolchain
-从源码构建这两个阶段：
+BL2 负责早期硬件与 DDR 初始化，BL31 提供 EL3 运行时环境。本项目使用固定的
+TF-A ``lts-v2.10.34`` upstream 填充基线、Airoha AN7581 TF-A tree、Mbed TLS
+和 Arm GNU Toolchain 从源码构建这两个阶段：
 
 * BL21、BL22、BL23 分三次编译，再与 NAND flash table 组装为 BL2；
 * BL31 编译后使用 Airoha 兼容的 LZMA 4.65 格式压缩；
@@ -477,15 +477,18 @@ artifact：
    gh variable set XG2010G_FIP_OFFSET --repo naoki66/u-boot-for-brightspeed-gemtek --body 0x800
    gh variable set XG2010G_FIP_ALIGN --repo naoki66/u-boot-for-brightspeed-gemtek --body 0x400
 
-TF-A 工具版本固定在 workflow 内的 ``FIXED_TFA_REF=v2.13.0``，用于构建
+TF-A 工具版本固定在 workflow 内的 ``FIXED_TFA_REF=v2.15.0``，用于构建
 ``fiptool`` 和 ``cert_create``。手动运行 Actions 时不再提供 TF-A ref 输入，
 也**不再读取 ``XG2010G_TFA_REF`` 这类板级 TFA 变量**，避免误填不同 TF-A
 版本导致 FIP/证书产物不可复现。如确实需要自定义 TFA 源，请直接 fork
 workflow 并修改 ``FIXED_TFA_REF``。
 
-BL2/BL31 使用 TF-A ``v2.10`` 基线、Airoha overlay
+BL2/BL31 使用 TF-A ``lts-v2.10.34`` upstream 填充基线、Airoha tree
 ``94892b9e42eb1f6992e60bce904c3ef42ea995c8`` 和 Mbed TLS
-``72718dd87e087215ce9155a826ee5a66cfbe9631`` 构建。
+``72718dd87e087215ce9155a826ee5a66cfbe9631`` 构建。当前 Airoha tree
+本身仍基于 TF-A 2.10，并会覆盖它改动过的上游文件；因此串口 banner
+仍可能显示 ``v2.10.0-dirty``，直到 Airoha tree 被完整 rebase 到更新的
+TF-A 版本。
 
 默认构建只需要设置签名私钥 Secret（XR1710G 同理，对应
 ``XR1710G_TB_PRIVATE_KEY``）：
@@ -639,7 +642,8 @@ ImmortalWrt ``an7581-xr1710g-ubi.dts``）：
   交换；交换芯片保持原生端口映射（内部 PHY 9/10），本仓库 U-Boot 的
   switch 自动轮询窗口固定为 8..12，刚好覆盖 9/10 与 XG2010G 的 12；
 * ``gdm4`` 通过 USXGMII 连接 phy5，``gdm2`` 通过 USXGMII 连接 phy8；
-  ``gdm1`` 仍为交换芯片 CPU 口，LAN1/LAN2 两个网口由内部交换口提供；
+  它们是两个外部 RTL8261N 10G 口，不由内部交换口提供；``gdm1`` 仍为
+  交换芯片 CPU 口；
 * LAN1/LAN2 网口绿/黄灯是软件 GPIO（绿 43/44、黄 33/34，低有效），
   恢复页按链路速度点亮：千兆亮绿灯、10/100M 亮黄灯、有流量时 100ms
   周期闪烁；XG2010G 的 LAN4 口绿/黄灯（46/42）同理；

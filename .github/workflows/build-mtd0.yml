@@ -36,7 +36,9 @@ on:
 env:
   ARCH: arm
   AIROHA_ATF_REF: 94892b9e42eb1f6992e60bce904c3ef42ea995c8
-  ATF_BASE_REF: v2.10
+  # Upstream TF-A fill-in base used before applying the pinned Airoha tree.
+  # Keep this on the v2.10 LTS line until the Airoha TF-A overlay is rebased.
+  ATF_BASE_REF: lts-v2.10.34
   BL2_TOOLCHAIN_NAME: arm-gnu-toolchain-15.3.rel1-x86_64-arm-none-eabi
   BL2_TOOLCHAIN_SHA256: 563bebb2b97d53382b956d6ee1fe61e2cae26699901417234a37df505ef9b5fa
   BL2_TOOLCHAIN_URL: https://gitlab.arm.com/api/v4/projects/tooling%2Fgnu-toolchains-for-arm/packages/generic/gnu-toolchain/15.3.rel1/arm-gnu-toolchain-15.3.rel1-x86_64-arm-none-eabi.tar.xz
@@ -50,7 +52,9 @@ env:
   DEFAULT_MTD0_SIZE: "0x200000"
   DEFAULT_NTFW_NVCTR: "0"
   DEFAULT_TFW_NVCTR: "0"
-  FIXED_TFA_REF: v2.13.0
+  # fiptool/cert_create may safely track a newer stable TF-A than the Airoha
+  # runtime tree used for BL2/BL31.
+  FIXED_TFA_REF: v2.15.0
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   LZMA_SOURCE_SHA256: dcbdb5f4843eff638e4a5e8be0e2486a3c5483df73c70823618db8e66f609ec2
   LZMA_SOURCE_URL: https://sources.openwrt.org/lzma-4.65.tar.bz2
@@ -333,7 +337,7 @@ jobs:
           test -x trusted-firmware-a/tools/fiptool/fiptool
           test -x trusted-firmware-a/tools/cert_create/cert_create
 
-      - name: Checkout TF-A v2.10 base
+      - name: Checkout Airoha TF-A base
         uses: actions/checkout@v7
         with:
           repository: ARM-software/arm-trusted-firmware
