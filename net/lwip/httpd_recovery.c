@@ -134,6 +134,7 @@ unsigned long airoha_recovery_get_lan_activity_ms(void)
 #define RECOVERY_UPLOAD_MAX    (64 * 1024 * 1024UL)
 #define RECOVERY_MIN_FIRMWARE_SIZE (1 * 1024 * 1024UL)
 #define RECOVERY_MAX_UBOOT_SIZE    (2 * 1024 * 1024UL)
+#define RECOVERY_RAW_PART_SIZE     (2 * 1024 * 1024UL)
 /*
  * The on-NAND UBI geometry (size/erase/write/oob/part/version) used to live
  * here as RECOVERY_XG2010G_UBI_* macros.  It now lives in
@@ -277,8 +278,40 @@ static u32 recovery_le32_to_cpu(const void *p)
 enum upload_target {
 	TARGET_FIRMWARE = 0,
 	TARGET_UBOOT,
+	TARGET_UENV,
+	TARGET_DSD,
 };
 static enum upload_target current_target = TARGET_FIRMWARE;
+
+static unsigned long recovery_target_exact_size(enum upload_target tgt)
+{
+	switch (tgt) {
+	case TARGET_UBOOT:
+		return RECOVERY_MAX_UBOOT_SIZE;
+	case TARGET_UENV:
+	case TARGET_DSD:
+		return RECOVERY_RAW_PART_SIZE;
+	case TARGET_FIRMWARE:
+	default:
+		return 0;
+	}
+}
+
+static const char *recovery_upload_target_name(enum upload_target tgt)
+{
+	switch (tgt) {
+	case TARGET_FIRMWARE:
+		return "firmware";
+	case TARGET_UBOOT:
+		return "U-Boot";
+	case TARGET_UENV:
+		return "uenv";
+	case TARGET_DSD:
+		return "dsd";
+	default:
+		return "unknown";
+	}
+}
 
 struct recovery_ubi_layout {
 	const char *version;
@@ -1508,8 +1541,9 @@ static int recovery_dhcp_server_init(struct recovery_dhcp_server *srv,
 
 	/* Offer the first usable host address of the port's own subnet so
 	 * multi-port setups (192.168.<seq+1>.1/24 each) stay consistent.
-	 * lwIP stores ip4_addr_t in host order: host part 2 == x.x.x.2. */
-	srv->client_ip.addr = (srv->server_ip.addr & srv->netmask.addr) | 0x2;
+	 * lwIP stores ip4_addr_t in network byte order. */
+	srv->client_ip.addr = (srv->server_ip.addr & srv->netmask.addr) |
+			      PP_HTONL(0x2);
 
 	if (ip4_addr_isany(&srv->netmask)) {
 		if (!ip4addr_aton(RECOVERY_DHCP_BROADCAST_IPADDR, &srv->broadcast))
@@ -1721,6 +1755,10 @@ static const char *recovery_default_target(enum upload_target tgt)
 		return "fit";
 	case TARGET_UBOOT:
 		return "bootloader";
+	case TARGET_UENV:
+		return "uenv";
+	case TARGET_DSD:
+		return "dsd";
 	}
 
 	return "fit";
@@ -1733,6 +1771,10 @@ static const char *recovery_target_env(enum upload_target tgt)
 		return "recovery_mtd";
 	case TARGET_UBOOT:
 		return "recovery_mtd_uboot";
+	case TARGET_UENV:
+		return "recovery_mtd_uenv";
+	case TARGET_DSD:
+		return "recovery_mtd_dsd";
 	}
 
 	return "recovery_mtd";
@@ -1745,6 +1787,10 @@ static const char *recovery_raw_env(enum upload_target tgt)
 		return "recovery_dev";
 	case TARGET_UBOOT:
 		return "recovery_dev_uboot";
+	case TARGET_UENV:
+		return "recovery_dev_uenv";
+	case TARGET_DSD:
+		return "recovery_dev_dsd";
 	}
 
 	return "recovery_dev";
@@ -1757,6 +1803,10 @@ static const char *recovery_size_env(enum upload_target tgt)
 		return "recovery_size";
 	case TARGET_UBOOT:
 		return "recovery_size_uboot";
+	case TARGET_UENV:
+		return "recovery_size_uenv";
+	case TARGET_DSD:
+		return "recovery_size_dsd";
 	}
 
 	return "recovery_size";
@@ -1768,6 +1818,8 @@ static ulong recovery_raw_offset(enum upload_target tgt)
 	case TARGET_FIRMWARE:
 		return env_get_hex("recovery_ofs", 0x050000);
 	case TARGET_UBOOT:
+	case TARGET_UENV:
+	case TARGET_DSD:
 		return 0;
 	}
 
@@ -1778,6 +1830,8 @@ static const char *recovery_default_raw(enum upload_target tgt)
 {
 	switch (tgt) {
 	case TARGET_UBOOT:
+	case TARGET_UENV:
+	case TARGET_DSD:
 		return NULL;
 	case TARGET_FIRMWARE:
 	default:
@@ -1788,6 +1842,9 @@ static const char *recovery_default_raw(enum upload_target tgt)
 static unsigned long recovery_target_size_cap(enum upload_target tgt)
 {
 	ulong size_cap = env_get_hex(recovery_size_env(tgt), 0);
+
+	if (tgt == TARGET_UENV || tgt == TARGET_DSD)
+		return RECOVERY_RAW_PART_SIZE;
 
 	if (tgt == TARGET_UBOOT &&
 	    (!size_cap || size_cap > RECOVERY_MAX_UBOOT_SIZE))
@@ -1811,6 +1868,10 @@ static const char *recovery_ubi_part(enum upload_target tgt)
 	switch (tgt) {
 	case TARGET_UBOOT:
 		part = env_get("recovery_ubi_part_uboot");
+		break;
+	case TARGET_UENV:
+	case TARGET_DSD:
+		part = NULL;
 		break;
 	case TARGET_FIRMWARE:
 	default:
@@ -1986,6 +2047,29 @@ static int recovery_resolve_target(enum upload_target tgt,
 
 	mtd_probe_devices();
 
+	if (tgt == TARGET_UENV || tgt == TARGET_DSD) {
+		name = recovery_default_target(tgt);
+		mtd = get_mtd_device_nm(name);
+		if (IS_ERR_OR_NULL(mtd))
+			return IS_ERR(mtd) ? PTR_ERR(mtd) : -ENODEV;
+
+		if (mtd->size != RECOVERY_RAW_PART_SIZE) {
+			printf("Refusing %s target with size %llu, expected %lu\n",
+			       name, (unsigned long long)mtd->size,
+			       RECOVERY_RAW_PART_SIZE);
+			put_mtd_device(mtd);
+			return -EINVAL;
+		}
+
+		target->backend = RECOVERY_BACKEND_MTD;
+		target->name = name;
+		target->mtd = mtd;
+		target->ofs = 0;
+		target->limit = mtd->size;
+		target->cur_size = target->limit;
+		return 0;
+	}
+
 	if (tgt == TARGET_UBOOT) {
 		if (!name || strcmp(name, "bootloader")) {
 			printf("Refusing U-Boot update target '%s'; expected bootloader/mtd0\n",
@@ -2059,6 +2143,10 @@ static int recovery_resolve_target(enum upload_target tgt,
 			raw = env_get("recovery_dev");
 			if (!raw)
 				raw = "nor0";
+			break;
+		case TARGET_UENV:
+		case TARGET_DSD:
+			raw = NULL;
 			break;
 		}
 	}
@@ -3023,6 +3111,83 @@ static int recovery_open_custom_response(struct fs_file *file,
 	return 1;
 }
 
+static int recovery_open_mtd_backup(struct fs_file *file, const char *part,
+				    const char *filename)
+{
+	struct mtd_info *mtd;
+	size_t retlen = 0;
+	size_t body_len = RECOVERY_RAW_PART_SIZE;
+	size_t total_len;
+	char header[256];
+	char *page;
+	int header_len;
+	int ret;
+
+	mtd_probe_devices();
+	mtd = get_mtd_device_nm(part);
+	if (IS_ERR_OR_NULL(mtd)) {
+		printf("HTTP recovery: backup partition '%s' is unavailable: %ld\n",
+		       part, IS_ERR(mtd) ? PTR_ERR(mtd) : -ENODEV);
+		return 0;
+	}
+
+	if (mtd->size != RECOVERY_RAW_PART_SIZE) {
+		printf("HTTP recovery: refusing backup of '%s' with size %llu, expected %lu\n",
+		       part, (unsigned long long)mtd->size,
+		       RECOVERY_RAW_PART_SIZE);
+		put_mtd_device(mtd);
+		return 0;
+	}
+
+	header_len = snprintf(header, sizeof(header),
+			      "HTTP/1.0 200 OK\r\n"
+			      "Content-Type: application/octet-stream\r\n"
+			      "Content-Disposition: attachment; filename=\"%s\"\r\n"
+			      "Cache-Control: no-store\r\n"
+			      "Content-Length: %lu\r\n"
+			      "Connection: close\r\n"
+			      "\r\n",
+			      filename, RECOVERY_RAW_PART_SIZE);
+	if (header_len < 0 || header_len >= (int)sizeof(header)) {
+		put_mtd_device(mtd);
+		return 0;
+	}
+
+	total_len = header_len + body_len;
+	if (total_len > INT_MAX) {
+		put_mtd_device(mtd);
+		return 0;
+	}
+
+	page = malloc(total_len + 1);
+	if (!page) {
+		printf("HTTP recovery: no memory for %lu-byte '%s' backup\n",
+		       RECOVERY_RAW_PART_SIZE, part);
+		put_mtd_device(mtd);
+		return 0;
+	}
+
+	memcpy(page, header, header_len);
+	ret = mtd_read(mtd, 0, body_len, &retlen, page + header_len);
+	put_mtd_device(mtd);
+	if ((ret && ret != -EUCLEAN) || retlen != body_len) {
+		printf("HTTP recovery: failed to read '%s' backup: ret=%d retlen=%lu\n",
+		       part, ret, (unsigned long)retlen);
+		free(page);
+		return 0;
+	}
+
+	page[total_len] = '\0';
+	file->data = page;
+	file->len = (int)total_len;
+	file->index = file->len;
+	file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+
+	printf("HTTP recovery: serving %lu-byte backup of '%s'\n",
+	       RECOVERY_RAW_PART_SIZE, part);
+	return 1;
+}
+
 /* lwIP httpd custom file hooks: serve only dynamic endpoints; static files via fsdata */
 int fs_open_custom(struct fs_file *file, const char *name)
 {
@@ -3088,6 +3253,15 @@ int fs_open_custom(struct fs_file *file, const char *name)
         return recovery_open_custom_response(file, "application/json",
 					     json, json_len);
     }
+    else if (!strcmp(p, "backup/env.bin")) {
+	return recovery_open_mtd_backup(file, "uenv", "env-2m.bin");
+    }
+    else if (!strcmp(p, "backup/uenv.bin")) {
+	return recovery_open_mtd_backup(file, "uenv", "uenv-2m.bin");
+    }
+    else if (!strcmp(p, "backup/dsd.bin")) {
+	return recovery_open_mtd_backup(file, "dsd", "dsd-2m.bin");
+    }
     /* Do not intercept favicon/index/ok/fail: served by fsdata */
     /* let fsdata handle others */
     return 0;
@@ -3119,6 +3293,13 @@ int fs_read_custom(struct fs_file *file, char *buffer, int count)
 /* Complete custom responses are supplied in file->data by fs_open_custom(). */
 
 /* HTTP POST handlers */
+static bool recovery_upload_uri_matches(const char *uri, const char *path)
+{
+	size_t len = strlen(path);
+
+	return !strncmp(uri, path, len) && (uri[len] == '\0' || uri[len] == '?');
+}
+
 err_t httpd_post_begin(void *connection, const char *uri, const char *http_request,
                        u16_t http_request_len, int content_len, char *response_uri,
                        u16_t response_uri_len, u8_t *post_auto_wnd)
@@ -3180,8 +3361,7 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
     prog_write_done = 0;
     prog_write_total = 0;
     /* Accept optional query parameters after the target path. */
-    if (!strncmp(uri, "/upload/firmware", 16) &&
-        (uri[16] == '\0' || uri[16] == '?')) {
+    if (recovery_upload_uri_matches(uri, "/upload/firmware")) {
         current_target = TARGET_FIRMWARE;
         if (recovery_parse_ubi_layout(uri)) {
             printf("httpd: rejecting unknown UBI layout in '%s'\n", uri);
@@ -3189,8 +3369,7 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
 	    strlcpy(response_uri, "/400.html", response_uri_len);
             return ERR_ARG;
         }
-    } else if (!strncmp(uri, "/upload/uboot", 13) &&
-               (uri[13] == '\0' || uri[13] == '?')) {
+    } else if (recovery_upload_uri_matches(uri, "/upload/uboot")) {
         /*
          * U-Boot maintenance writes only the signed 2 MiB mtd0/bootloader
          * image. Old chainloader-slot environment variables are ignored so
@@ -3198,8 +3377,12 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
          * or the UBI firmware partition.
          */
         current_target = TARGET_UBOOT;
-    } else if (!strncmp(uri, "/upload", 7) &&
-               (uri[7] == '\0' || uri[7] == '?')) {
+    } else if (recovery_upload_uri_matches(uri, "/upload/uenv") ||
+               recovery_upload_uri_matches(uri, "/upload/env")) {
+        current_target = TARGET_UENV;
+    } else if (recovery_upload_uri_matches(uri, "/upload/dsd")) {
+        current_target = TARGET_DSD;
+    } else if (recovery_upload_uri_matches(uri, "/upload")) {
         current_target = TARGET_FIRMWARE;
         if (recovery_parse_ubi_layout(uri)) {
             prog_phase = -1;
@@ -3217,6 +3400,7 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
         ulong env_max = env_get_hex("recovery_max", 0);
         loff_t tmpofs = 0;
         ulong dts_max = recovery_calc_target_max(current_target, &tmpofs);
+        ulong exact = recovery_target_exact_size(current_target);
         ulong max;
 
         /* Do not accept data that cannot be mapped to a real target. */
@@ -3232,17 +3416,17 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
 
         if (current_target == TARGET_FIRMWARE)
             min = RECOVERY_MIN_FIRMWARE_SIZE;
-        else if (current_target == TARGET_UBOOT &&
-                 max > RECOVERY_MAX_UBOOT_SIZE)
-            max = RECOVERY_MAX_UBOOT_SIZE;
+        else if (exact && max > exact)
+            max = exact;
 
-        if (env_max && env_max < max)
+        if (!exact && env_max && env_max < max)
             max = env_max; /* allow env to further cap */
-        if (content_len > 0 && current_target == TARGET_UBOOT &&
-            (ulong)content_len != RECOVERY_MAX_UBOOT_SIZE) {
+        if (content_len > 0 && exact &&
+            (ulong)content_len != exact) {
             prog_phase = -1;
-            printf("httpd: U-Boot upload must be exactly %lu bytes, got %d\n",
-                   RECOVERY_MAX_UBOOT_SIZE, content_len);
+            printf("httpd: %s upload must be exactly %lu bytes, got %d\n",
+                   recovery_upload_target_name(current_target), exact,
+                   content_len);
             strlcpy(response_uri, "/400.html", response_uri_len);
             return ERR_ARG;
         }
@@ -3302,7 +3486,8 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
                current_ubi_layout && current_ubi_layout->version
                        ? current_ubi_layout->version : "unknown");
     else
-        printf("httpd: accepting %u-byte U-Boot image\n", recv_total);
+        printf("httpd: accepting %u-byte %s image\n", recv_total,
+               recovery_upload_target_name(current_target));
     return ERR_OK;
 }
 
@@ -3437,12 +3622,21 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 	struct recovery_target target;
 	const u8 *image = recv_base;
 	u32 image_size = recv_off;
+	unsigned long exact = recovery_target_exact_size(current_target);
 	int ret;
 
 	post_ok = 0;
 
 	if (!image_size) {
 		printf("No data received to flash\n");
+		prog_phase = -1;
+		return -EINVAL;
+	}
+
+	if (exact && image_size != exact) {
+		printf("%s image must be exactly %lu bytes: %u bytes\n",
+		       recovery_upload_target_name(current_target), exact,
+		       image_size);
 		prog_phase = -1;
 		return -EINVAL;
 	}
@@ -3618,7 +3812,7 @@ printf("Failed to select UBI %s rebuild target: %d\n",
 		prog_phase = 2;
 		ret = recovery_write_mtd_region(mtd, ofs, target.limit, image,
 						image_size,
-						current_target == TARGET_UBOOT,
+						exact != 0,
 						status_leds);
 		if (ret) {
 			printf("mtd_write failed: %d\n", ret);

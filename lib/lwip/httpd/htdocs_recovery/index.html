@@ -234,6 +234,56 @@ button,input,select{font:inherit;letter-spacing:0}
 }
 .file-help.ok{color:var(--green)}
 .file-help.error{color:var(--red)}
+.partition-block{
+  width:min(420px,100%);
+  margin:20px auto 0;
+  display:grid;
+  gap:10px;
+}
+.partition-block[hidden]{display:none}
+.partition-card{
+  padding:13px;
+  border:1px solid var(--line);
+  border-radius:7px;
+  background:#fbfcfe;
+}
+.partition-card.active{
+  border-color:#a9c8f4;
+  background:var(--blue-soft);
+}
+.partition-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  margin-bottom:10px;
+}
+.partition-head strong{font-size:13px}
+.partition-head span{color:var(--muted);font-size:11px;font-weight:680}
+.partition-actions{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:10px;
+}
+.backup-button,.partition-select{
+  min-height:38px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:0 12px;
+  border:1px solid var(--line-strong);
+  border-radius:7px;
+  color:#314154;
+  background:#ffffff;
+  text-decoration:none;
+  font-weight:700;
+  cursor:pointer;
+  transition:color .16s ease,background .16s ease,border-color .16s ease,opacity .16s ease;
+}
+.backup-button:hover,.partition-select:hover{color:var(--blue-dark);border-color:#a9c8f4;background:var(--blue-soft)}
+.partition-select.active{color:#ffffff;border-color:var(--blue-dark);background:var(--blue)}
+.backup-button.disabled,.partition-select:disabled{pointer-events:none;opacity:.45}
+.partition-help{margin:2px 0 0;color:var(--muted);font-size:12px;line-height:1.5}
 .upload-wrap{display:flex;justify-content:center;margin-top:20px}
 .upload-button{
   min-width:160px;
@@ -331,7 +381,7 @@ button,input,select{font:inherit;letter-spacing:0}
   .sidebar{z-index:10;height:auto;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 8px;padding:12px;border-right:0;border-bottom:1px solid var(--line);box-shadow:0 4px 12px #0001}
   .brand{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 2px 8px;border:0}
   .brand span{margin:0;text-align:right}
-  .nav{grid-column:1/-1;margin:0;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .nav{grid-column:1/-1;margin:0;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
   .nav-button,.reboot-button{height:50px;min-height:50px;padding:4px;font-size:12px;line-height:1.25;text-align:center}
   .nav-button{justify-content:center}
   .nav-dot{display:none}
@@ -366,6 +416,7 @@ button,input,select{font:inherit;letter-spacing:0}
     <nav class='nav' aria-label='Recovery target'>
       <button class='nav-button active' type='button' data-target='firmware' aria-current='page'><span class='nav-dot'></span>Firmware Recovery</button>
       <button class='nav-button' type='button' data-target='uboot'><span class='nav-dot'></span>Update U-Boot</button>
+      <button class='nav-button' type='button' data-target='partitions'><span class='nav-dot'></span>ENV / DSD</button>
     </nav>
     <div class='side-actions'>
       <button class='reboot-button' id='reboot-button' type='button'>Reboot to System</button>
@@ -391,6 +442,24 @@ button,input,select{font:inherit;letter-spacing:0}
             <span class='target-label'>Environment</span><span class='target-value' id='preserve-value'>Loaded from mtd1/uenv; recovery_trigger is a one-shot software flag</span>
             <span class='target-label'>Detected</span><span class='target-value' id='detected-layout'>Checking current layout...</span>
           </div>
+
+          <section class='partition-block' id='partition-block' aria-label='ENV and DSD partition maintenance' hidden>
+            <div class='partition-card active' data-card-target='uenv'>
+              <div class='partition-head'><strong>env (uenv)</strong><span>mtd1 @ 0x00200000, 2 MiB</span></div>
+              <div class='partition-actions'>
+                <a class='backup-button' href='/backup/env.bin' download='env-2m.bin'>Backup env</a>
+                <button class='partition-select active' type='button' data-partition-target='uenv'>Flash env</button>
+              </div>
+            </div>
+            <div class='partition-card' data-card-target='dsd'>
+              <div class='partition-head'><strong>dsd</strong><span>mtd2 @ 0x00400000, 2 MiB</span></div>
+              <div class='partition-actions'>
+                <a class='backup-button' href='/backup/dsd.bin' download='dsd-2m.bin'>Backup dsd</a>
+                <button class='partition-select' type='button' data-partition-target='dsd'>Flash dsd</button>
+              </div>
+            </div>
+            <p class='partition-help'>Backup first, then flash only a matching exact 2 MiB raw partition image.</p>
+          </section>
 
           <div class='layout-block' id='layout-block'>
             <label class='layout-label'>Image UBI layout</label>
@@ -453,11 +522,14 @@ button,input,select{font:inherit;letter-spacing:0}
 <script>
 var activeTarget='firmware';
 var selectedLayout='2.0';
+var selectedPartition='uenv';
 var selectedFile=null;
 var busy=false;
 var pollTimer=null;
 var pollEpoch=0;
 var pollOutcome=0;
+var partitionTargets={uenv:true,dsd:true};
+var partitionLabels={uenv:'env',dsd:'dsd'};
 
 /* The recovery pages are shared by every board that enables this server,
    so the model is injected from /about instead of being baked into the
@@ -496,6 +568,26 @@ var profiles={
 	    help:'Use {board-file}-*-mtd0-signed.bin, not u-boot.bin or bare FIP',
 	    action:'Upload and Update',
 	    notices:['Do not power off or reboot the device during the U-Boot update!','The signed mtd0 FIP header is validated before writing.','uenv, dsd, UBI firmware volumes, and reserved BMT are not modified.']
+	  },
+  uenv:{
+	    title:'ENV / DSD Maintenance',
+	    copy:'Backup or restore the fixed 2 MiB raw env and dsd partitions.',
+	    target:'env / uenv @ 0x00200000',
+	    scope:'Erase and rewrite only the 2 MiB env partition',
+	    preserve:'bootloader, dsd, UBI firmware volumes, and reserved BMT area',
+	    help:'Use an exact 2 MiB raw env backup image',
+	    action:'Upload and Flash env',
+	    notices:['Do not power off or reboot the device while flashing env!','Backup env and dsd before restoring either partition.','Only exact 2 MiB raw partition images are accepted.','The device restarts automatically when flashing completes.']
+	  },
+  dsd:{
+	    title:'ENV / DSD Maintenance',
+	    copy:'Backup or restore the fixed 2 MiB raw env and dsd partitions.',
+	    target:'dsd @ 0x00400000',
+	    scope:'Erase and rewrite only the 2 MiB dsd partition',
+	    preserve:'bootloader, env, UBI firmware volumes, and reserved BMT area',
+	    help:'Use an exact 2 MiB raw dsd backup image',
+	    action:'Upload and Flash dsd',
+	    notices:['Do not power off or reboot the device while flashing dsd!','Backup env and dsd before restoring either partition.','Only exact 2 MiB raw partition images are accepted.','The device restarts automatically when flashing completes.']
 	  }
 };
 
@@ -509,16 +601,34 @@ var fileName=document.getElementById('file-name');
 var fileHelp=document.getElementById('file-help');
 var uploadButton=document.getElementById('upload-button');
 var rebootButton=document.getElementById('reboot-button');
+var backupLinks=document.querySelectorAll('.backup-button');
+var partitionBlock=document.getElementById('partition-block');
+var partitionButtons=document.querySelectorAll('.partition-select');
 var layoutBlock=document.getElementById('layout-block');
 var layoutHelp=document.getElementById('layout-help');
 var state=document.getElementById('state');
 var statusMessage=document.getElementById('status-message');
 
 function profile(){return profiles[activeTarget]}
+function navTarget(){return partitionTargets[activeTarget]?'partitions':activeTarget}
+
+function updatePartitionSelection(){
+  var cards=document.querySelectorAll('.partition-card');
+  for(var c=0;c<cards.length;c++){
+    cards[c].classList.toggle('active',cards[c].getAttribute('data-card-target')===selectedPartition);
+  }
+  for(var b=0;b<partitionButtons.length;b++){
+    var target=partitionButtons[b].getAttribute('data-partition-target');
+    var active=target===selectedPartition;
+    partitionButtons[b].classList.toggle('active',active);
+    partitionButtons[b].textContent=active?'Selected for flash':'Flash '+partitionLabels[target];
+  }
+}
 
 function updateLayout(){
   var layout=layouts[selectedLayout]||layouts['2.0'];
   layoutBlock.hidden=activeTarget!=='firmware';
+  partitionBlock.hidden=!partitionTargets[activeTarget];
   layoutHelp.textContent=bt(layout.help);
   layoutHelp.className='layout-help'+(layout.warning?' warning':'');
   if(activeTarget==='firmware'){
@@ -527,12 +637,14 @@ function updateLayout(){
 }
 
 function setTarget(target){
+  if(target==='partitions')target=selectedPartition;
   if(busy||!profiles[target])return;
   activeTarget=target;
+  if(partitionTargets[target])selectedPartition=target;
   var p=profile();
   var buttons=document.querySelectorAll('.nav-button');
   for(var i=0;i<buttons.length;i++){
-    var active=buttons[i].getAttribute('data-target')===target;
+    var active=buttons[i].getAttribute('data-target')===navTarget();
     buttons[i].classList.toggle('active',active);
     if(active)buttons[i].setAttribute('aria-current','page');
     else buttons[i].removeAttribute('aria-current');
@@ -552,6 +664,7 @@ function setTarget(target){
     item.textContent=bt(p.notices[n]);
     list.appendChild(item);
 	  }
+  updatePartitionSelection();
 	  updateLayout();
   resetProgress();
   validateFile();
@@ -566,7 +679,8 @@ function formatBytes(bytes){
 function fileError(){
   if(!selectedFile)return'';
   if(activeTarget==='firmware'&&selectedFile.size<1024*1024)return'Firmware images must be at least 1 MiB.';
-  if(activeTarget==='uboot'&&selectedFile.size>2*1024*1024)return'U-Boot mtd0 images must not exceed 2 MiB.';
+  if(activeTarget==='uboot'&&selectedFile.size!==2*1024*1024)return'U-Boot mtd0 images must be exactly 2 MiB.';
+  if(partitionTargets[activeTarget]&&selectedFile.size!==2*1024*1024)return'Raw env/dsd partition images must be exactly 2 MiB.';
   return'';
 }
 
@@ -599,6 +713,11 @@ function setBusy(value){
   chooseButton.disabled=value;
   var buttons=document.querySelectorAll('.nav-button');
 	  for(var i=0;i<buttons.length;i++)buttons[i].disabled=value;
+  for(var j=0;j<backupLinks.length;j++){
+    backupLinks[j].classList.toggle('disabled',value);
+    backupLinks[j].setAttribute('aria-disabled',value?'true':'false');
+  }
+  for(var k=0;k<partitionButtons.length;k++)partitionButtons[k].disabled=value;
 	  rebootButton.disabled=value;
   validateFile();
 }
@@ -768,10 +887,16 @@ var navButtons=document.querySelectorAll('.nav-button');
 for(var i=0;i<navButtons.length;i++){
   navButtons[i].addEventListener('click',function(){setTarget(this.getAttribute('data-target'))});
 }
+for(var p=0;p<partitionButtons.length;p++){
+  partitionButtons[p].addEventListener('click',function(){setTarget(this.getAttribute('data-partition-target'))});
+}
 chooseButton.addEventListener('click',function(){if(!busy)fileInput.click()});
 fileInput.addEventListener('change',function(){selectedFile=this.files[0]||null;validateFile()});
 uploadButton.addEventListener('click',upload);
 rebootButton.addEventListener('click',rebootToSystem);
+for(var b=0;b<backupLinks.length;b++){
+  backupLinks[b].addEventListener('click',function(event){if(busy)event.preventDefault()});
+}
 
 (async function(){
   setTarget('firmware');

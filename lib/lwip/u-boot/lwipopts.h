@@ -200,7 +200,12 @@
 #define LWIP_DISABLE_MEMP_SANITY_CHECKS 1
 
 #define LWIP_SOCKET                     0
+#if defined(CONFIG_HTTPD_RECOVERY)
+/* Recovery binds one DHCP server per netif to the shared UDP/67 endpoint. */
+#define SO_REUSE                        1
+#else
 #define SO_REUSE                        0
+#endif
 
 #define LWIP_STATS                      0
 

@@ -39,6 +39,7 @@ def status_line(path):
 
 
 def header_comment(text, size, exact=True):
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
     suffix = " (%d bytes) */" % size if exact else " (%d+ bytes) */" % size
     return "/* \"%s\"%s" % (text, suffix)
 
@@ -153,8 +154,8 @@ def render(files):
     out.append("#define FS_NUMFILES %d" % len(files))
     out.append("")
 
-    # The checked-in fsdata uses CRLF line endings throughout.
-    return "\r\n".join(out)
+    # The repository normalizes generated source files to LF line endings.
+    return "\n".join(out)
 
 
 def main():
