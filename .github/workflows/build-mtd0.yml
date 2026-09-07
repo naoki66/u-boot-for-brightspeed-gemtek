@@ -166,22 +166,53 @@ jobs:
         id: params
         env:
           BOARD: ${{ matrix.board }}
-          VAR_FIP_ALIGN: ${{ vars[concat(steps.board_ids.outputs.board_upper, '_FIP_ALIGN')] }}
-          VAR_FIP_OFFSET: ${{ vars[concat(steps.board_ids.outputs.board_upper, '_FIP_OFFSET')] }}
-          VAR_MTD0_SIZE: ${{ vars[concat(steps.board_ids.outputs.board_upper, '_MTD0_SIZE')] }}
-          VAR_NTFW_NVCTR: ${{ vars[concat(steps.board_ids.outputs.board_upper, '_NTFW_NVCTR')] }}
-          VAR_TFW_NVCTR: ${{ vars[concat(steps.board_ids.outputs.board_upper, '_TFW_NVCTR')] }}
+          # GitHub Actions expressions cannot concatenate strings to form a
+          # vars/secrets indexer key. The DSL has no string-concat function,
+          # so each per-board variable is enumerated by board name in env
+          # and the shell picks the one matching $BOARD_UPPER. Add new
+          # boards here AND extend the case statement below.
+          FIP_ALIGN_XG2010G: ${{ vars.XG2010G_FIP_ALIGN }}
+          FIP_ALIGN_XR1710G: ${{ vars.XR1710G_FIP_ALIGN }}
+          FIP_OFFSET_XG2010G: ${{ vars.XG2010G_FIP_OFFSET }}
+          FIP_OFFSET_XR1710G: ${{ vars.XR1710G_FIP_OFFSET }}
+          MTD0_SIZE_XG2010G: ${{ vars.XG2010G_MTD0_SIZE }}
+          MTD0_SIZE_XR1710G: ${{ vars.XR1710G_MTD0_SIZE }}
+          NTFW_NVCTR_XG2010G: ${{ vars.XG2010G_NTFW_NVCTR }}
+          NTFW_NVCTR_XR1710G: ${{ vars.XR1710G_NTFW_NVCTR }}
+          TFW_NVCTR_XG2010G: ${{ vars.XG2010G_TFW_NVCTR }}
+          TFW_NVCTR_XR1710G: ${{ vars.XR1710G_TFW_NVCTR }}
         run: |
           set -euo pipefail
           board_upper="${{ steps.board_ids.outputs.board_upper }}"
 
+          case "$board_upper" in
+            XG2010G)
+              fip_align="${FIP_ALIGN_XG2010G:-}"
+              fip_offset="${FIP_OFFSET_XG2010G:-}"
+              mtd0_size="${MTD0_SIZE_XG2010G:-}"
+              tfw_nvctr="${TFW_NVCTR_XG2010G:-}"
+              ntfw_nvctr="${NTFW_NVCTR_XG2010G:-}"
+              ;;
+            XR1710G)
+              fip_align="${FIP_ALIGN_XR1710G:-}"
+              fip_offset="${FIP_OFFSET_XR1710G:-}"
+              mtd0_size="${MTD0_SIZE_XR1710G:-}"
+              tfw_nvctr="${TFW_NVCTR_XR1710G:-}"
+              ntfw_nvctr="${NTFW_NVCTR_XR1710G:-}"
+              ;;
+            *)
+              echo "Unknown board for params: ${board_upper}" >&2
+              exit 1
+              ;;
+          esac
+
           tfa_ref="$FIXED_TFA_REF"
 
-          mtd0_size="${VAR_MTD0_SIZE:-$DEFAULT_MTD0_SIZE}"
-          fip_offset="${VAR_FIP_OFFSET:-$DEFAULT_FIP_OFFSET}"
-          fip_align="${VAR_FIP_ALIGN:-$DEFAULT_FIP_ALIGN}"
-          tfw_nvctr="${VAR_TFW_NVCTR:-$DEFAULT_TFW_NVCTR}"
-          ntfw_nvctr="${VAR_NTFW_NVCTR:-$DEFAULT_NTFW_NVCTR}"
+          mtd0_size="${mtd0_size:-$DEFAULT_MTD0_SIZE}"
+          fip_offset="${fip_offset:-$DEFAULT_FIP_OFFSET}"
+          fip_align="${fip_align:-$DEFAULT_FIP_ALIGN}"
+          tfw_nvctr="${tfw_nvctr:-$DEFAULT_TFW_NVCTR}"
+          ntfw_nvctr="${ntfw_nvctr:-$DEFAULT_NTFW_NVCTR}"
 
           mtd0_size_dec=$((mtd0_size))
           fip_offset_dec=$((fip_offset))
@@ -372,13 +403,44 @@ jobs:
           BOARD: ${{ matrix.board }}
           BOARD_UPPER: ${{ steps.board_ids.outputs.board_upper }}
           FIP_OFFSET_DEC: ${{ steps.params.outputs.fip_offset_dec }}
-          MTD0_PREFIX_B64: ${{ secrets[concat(steps.board_ids.outputs.board_upper, '_MTD0_PREFIX_B64')] }}
-          MTD0_PREFIX_SHA256: ${{ vars[concat(steps.board_ids.outputs.board_upper, '_MTD0_PREFIX_SHA256')] }}
-          MTD0_PREFIX_URL: ${{ secrets[concat(steps.board_ids.outputs.board_upper, '_MTD0_PREFIX_URL')] || vars[concat(steps.board_ids.outputs.board_upper, '_MTD0_PREFIX_URL')] }}
-          TB_PRIVATE_KEY: ${{ secrets[concat(steps.board_ids.outputs.board_upper, '_TB_PRIVATE_KEY')] }}
-          TB_PRIVATE_KEY_B64: ${{ secrets[concat(steps.board_ids.outputs.board_upper, '_TB_PRIVATE_KEY_B64')] }}
+          # GitHub Actions expressions cannot concatenate strings to form a
+          # vars/secrets indexer key, so each per-board signing input is
+          # enumerated by board name in env. The shell picks the one
+          # matching $BOARD_UPPER. Add new boards here AND extend the case
+          # statement below.
+          MTD0_PREFIX_B64_XG2010G: ${{ secrets.XG2010G_MTD0_PREFIX_B64 }}
+          MTD0_PREFIX_B64_XR1710G: ${{ secrets.XR1710G_MTD0_PREFIX_B64 }}
+          MTD0_PREFIX_SHA256_XG2010G: ${{ vars.XG2010G_MTD0_PREFIX_SHA256 }}
+          MTD0_PREFIX_SHA256_XR1710G: ${{ vars.XR1710G_MTD0_PREFIX_SHA256 }}
+          MTD0_PREFIX_URL_XG2010G: ${{ secrets.XG2010G_MTD0_PREFIX_URL || vars.XG2010G_MTD0_PREFIX_URL }}
+          MTD0_PREFIX_URL_XR1710G: ${{ secrets.XR1710G_MTD0_PREFIX_URL || vars.XR1710G_MTD0_PREFIX_URL }}
+          TB_PRIVATE_KEY_XG2010G: ${{ secrets.XG2010G_TB_PRIVATE_KEY }}
+          TB_PRIVATE_KEY_XR1710G: ${{ secrets.XR1710G_TB_PRIVATE_KEY }}
+          TB_PRIVATE_KEY_B64_XG2010G: ${{ secrets.XG2010G_TB_PRIVATE_KEY_B64 }}
+          TB_PRIVATE_KEY_B64_XR1710G: ${{ secrets.XR1710G_TB_PRIVATE_KEY_B64 }}
         run: |
           set -euo pipefail
+          BOARD_UPPER="${{ steps.board_ids.outputs.board_upper }}"
+          case "$BOARD_UPPER" in
+            XG2010G)
+              MTD0_PREFIX_B64="${MTD0_PREFIX_B64_XG2010G:-}"
+              MTD0_PREFIX_SHA256="${MTD0_PREFIX_SHA256_XG2010G:-}"
+              MTD0_PREFIX_URL="${MTD0_PREFIX_URL_XG2010G:-}"
+              TB_PRIVATE_KEY="${TB_PRIVATE_KEY_XG2010G:-}"
+              TB_PRIVATE_KEY_B64="${TB_PRIVATE_KEY_B64_XG2010G:-}"
+              ;;
+            XR1710G)
+              MTD0_PREFIX_B64="${MTD0_PREFIX_B64_XR1710G:-}"
+              MTD0_PREFIX_SHA256="${MTD0_PREFIX_SHA256_XR1710G:-}"
+              MTD0_PREFIX_URL="${MTD0_PREFIX_URL_XR1710G:-}"
+              TB_PRIVATE_KEY="${TB_PRIVATE_KEY_XR1710G:-}"
+              TB_PRIVATE_KEY_B64="${TB_PRIVATE_KEY_B64_XR1710G:-}"
+              ;;
+            *)
+              echo "Unknown board for signing: ${BOARD_UPPER}" >&2
+              exit 1
+              ;;
+          esac
           mkdir -p signing certs out
           missing=()
 
