@@ -410,7 +410,7 @@ SerDes 的角色从 LAN 改成 WAN，和原厂 TTL 及端口映射不符。
 
 bootloader 只允许在明确验证 FIP、签名、BL2/BL31 兼容性后替换
 ``0x00000000-0x00200000``。任何 bootloader 升级操作都必须保持
-``uenv`` 的 ``0x00200000-0x00400000`` 和 ``dsd`` 的
+工厂校准分区 ``uenv`` 的 ``0x00200000-0x00400000`` 和 ``dsd`` 的
 ``0x00400000-0x00600000`` 原样不变。``reserved_bmt`` 也不得写入。
 
 U-Boot 配置
@@ -615,7 +615,7 @@ NAND 和分区，再在 Linux 中确认 ``cat /proc/mtd`` 的边界与本 DTS �
 XR1710G 差异
 ------------
 
-Brightspeed Gemtek XR1710G 与 XG2010G 共用同一套启动链、NAND 分区布局、uenv/dsd 处理
+Brightspeed Gemtek XR1710G 与 XG2010G 共用同一套启动链、NAND 分区布局、工厂校准数据处理
 和 Recovery 流程，因此由同一份板级支持代码（``board/airoha/an7581``）同时
 服务两板，仅通过设备树区分硬件差异。XR1710G 使用
 ``configs/xr1710g_defconfig`` 与 ``arch/arm/dts/xr1710g.dts`` 构建，

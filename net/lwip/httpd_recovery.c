@@ -3369,12 +3369,12 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
             return ERR_ARG;
         }
     } else if (recovery_upload_uri_matches(uri, "/upload/uboot")) {
-        /*
-         * U-Boot maintenance writes only the signed 2 MiB mtd0/bootloader
-         * image. Old chainloader-slot environment variables are ignored so
-         * stale recovery_dev_uboot/uboot_ofs values cannot touch uenv, dsd,
-         * or the UBI firmware partition.
-         */
+	/*
+	 * U-Boot maintenance writes only the signed 2 MiB mtd0/bootloader
+	 * image. Old chainloader-slot environment variables are ignored so
+	 * stale recovery_dev_uboot/uboot_ofs values cannot touch factory
+	 * calibration partitions (uenv, dsd) or the UBI firmware partition.
+	 */
         current_target = TARGET_UBOOT;
     } else if (recovery_upload_uri_matches(uri, "/upload/uenv") ||
                recovery_upload_uri_matches(uri, "/upload/env")) {

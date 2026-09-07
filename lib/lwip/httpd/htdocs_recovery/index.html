@@ -416,7 +416,7 @@ button,input,select{font:inherit;letter-spacing:0}
     <nav class='nav' aria-label='Recovery target'>
       <button class='nav-button active' type='button' data-target='firmware' aria-current='page'><span class='nav-dot'></span>Firmware Recovery</button>
       <button class='nav-button' type='button' data-target='uboot'><span class='nav-dot'></span>Update U-Boot</button>
-      <button class='nav-button' type='button' data-target='partitions'><span class='nav-dot'></span>ENV / DSD</button>
+      <button class='nav-button' type='button' data-target='partitions'><span class='nav-dot'></span>Factory Calibration</button>
     </nav>
     <div class='side-actions'>
       <button class='reboot-button' id='reboot-button' type='button'>Reboot to System</button>
@@ -443,7 +443,7 @@ button,input,select{font:inherit;letter-spacing:0}
             <span class='target-label'>Detected</span><span class='target-value' id='detected-layout'>Checking current layout...</span>
           </div>
 
-          <section class='partition-block' id='partition-block' aria-label='ENV and DSD partition maintenance' hidden>
+          <section class='partition-block' id='partition-block' aria-label='Factory calibration partition maintenance' hidden>
             <div class='partition-card active' data-card-target='uenv'>
               <div class='partition-head'><strong>env (uenv)</strong><span>mtd1 @ 0x00200000, 2 MiB</span></div>
               <div class='partition-actions'>
@@ -458,7 +458,7 @@ button,input,select{font:inherit;letter-spacing:0}
                 <button class='partition-select' type='button' data-partition-target='dsd'>Flash dsd</button>
               </div>
             </div>
-            <p class='partition-help'>Backup first, then flash only a matching exact 2 MiB raw partition image.</p>
+            <p class='partition-help'>Back up factory calibration first, then flash only a matching exact 2 MiB raw partition image.</p>
           </section>
 
           <div class='layout-block' id='layout-block'>
@@ -564,30 +564,30 @@ var profiles={
 	    copy:'Upload the complete signed 2 MiB {board} mtd0 bootloader image.',
 	    target:'bootloader / mtd0 @ 0x000000',
 	    scope:'Erase and rewrite only the 2 MiB bootloader partition',
-	    preserve:'uenv, dsd, UBI firmware volumes, and reserved BMT area',
+	    preserve:'factory calibration partitions (uenv, dsd), UBI firmware volumes, and reserved BMT area',
 	    help:'Use {board-file}-*-mtd0-signed.bin, not u-boot.bin or bare FIP',
 	    action:'Upload and Update',
-	    notices:['Do not power off or reboot the device during the U-Boot update!','The signed mtd0 FIP header is validated before writing.','uenv, dsd, UBI firmware volumes, and reserved BMT are not modified.']
+	    notices:['Do not power off or reboot the device during the U-Boot update!','The signed mtd0 FIP header is validated before writing.','Factory calibration partitions (uenv, dsd), UBI firmware volumes, and reserved BMT are not modified.']
 	  },
   uenv:{
-	    title:'ENV / DSD Maintenance',
-	    copy:'Backup or restore the fixed 2 MiB raw env and dsd partitions.',
+	    title:'Factory Calibration',
+	    copy:'Back up or restore the fixed 2 MiB raw factory calibration partitions (env and dsd).',
 	    target:'env / uenv @ 0x00200000',
 	    scope:'Erase and rewrite only the 2 MiB env partition',
-	    preserve:'bootloader, dsd, UBI firmware volumes, and reserved BMT area',
+	    preserve:'bootloader, dsd factory calibration data, UBI firmware volumes, and reserved BMT area',
 	    help:'Use an exact 2 MiB raw env backup image',
 	    action:'Upload and Flash env',
-	    notices:['Do not power off or reboot the device while flashing env!','Backup env and dsd before restoring either partition.','Only exact 2 MiB raw partition images are accepted.','The device restarts automatically when flashing completes.']
+	    notices:['Do not power off or reboot the device while flashing env!','Back up factory calibration data before restoring either partition.','Only exact 2 MiB raw partition images are accepted.','The device restarts automatically when flashing completes.']
 	  },
   dsd:{
-	    title:'ENV / DSD Maintenance',
-	    copy:'Backup or restore the fixed 2 MiB raw env and dsd partitions.',
+	    title:'Factory Calibration',
+	    copy:'Back up or restore the fixed 2 MiB raw factory calibration partitions (env and dsd).',
 	    target:'dsd @ 0x00400000',
 	    scope:'Erase and rewrite only the 2 MiB dsd partition',
-	    preserve:'bootloader, env, UBI firmware volumes, and reserved BMT area',
+	    preserve:'bootloader, env factory calibration data, UBI firmware volumes, and reserved BMT area',
 	    help:'Use an exact 2 MiB raw dsd backup image',
 	    action:'Upload and Flash dsd',
-	    notices:['Do not power off or reboot the device while flashing dsd!','Backup env and dsd before restoring either partition.','Only exact 2 MiB raw partition images are accepted.','The device restarts automatically when flashing completes.']
+	    notices:['Do not power off or reboot the device while flashing dsd!','Back up factory calibration data before restoring either partition.','Only exact 2 MiB raw partition images are accepted.','The device restarts automatically when flashing completes.']
 	  }
 };
 
@@ -680,7 +680,7 @@ function fileError(){
   if(!selectedFile)return'';
   if(activeTarget==='firmware'&&selectedFile.size<1024*1024)return'Firmware images must be at least 1 MiB.';
   if(activeTarget==='uboot'&&selectedFile.size!==2*1024*1024)return'U-Boot mtd0 images must be exactly 2 MiB.';
-  if(partitionTargets[activeTarget]&&selectedFile.size!==2*1024*1024)return'Raw env/dsd partition images must be exactly 2 MiB.';
+  if(partitionTargets[activeTarget]&&selectedFile.size!==2*1024*1024)return'Factory calibration partition images must be exactly 2 MiB.';
   return'';
 }
 

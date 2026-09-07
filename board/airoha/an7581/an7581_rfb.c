@@ -96,7 +96,7 @@ static const char *const xg2010g_fdt_wan_mac_paths[] = {
 
 /*
  * The Brightspeed Gemtek AN7581 boards (XG2010G and XR1710G) share the
- * same NAND layout, uenv/dsd handling and recovery flow, so one board
+ * same NAND layout, factory calibration handling and recovery flow, so one board
  * support file serves both.
  */
 static bool xg2010g_is_compatible(void)
