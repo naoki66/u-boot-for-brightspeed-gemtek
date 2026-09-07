@@ -17,6 +17,7 @@
 #undef crc32
 #include <u-boot/crc.h>
 #include <xg2010g_version.h>
+#include "recovery.h"
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/err.h>
@@ -56,13 +57,27 @@ DECLARE_GLOBAL_DATA_PTR;
 #define XG2010G_FACTORY_LAN_MAC_OFFSET	0x6000
 #define XG2010G_FACTORY_SIZE		(XG2010G_FACTORY_LAN_MAC_OFFSET + ARP_HLEN)
 
+/*
+ * Single source of truth for the on-NAND UBI layout.  Both the active
+ * "supported layout" table and the recovery_board_ops geometry share the
+ * values defined here, so the framework and the board code cannot drift.
+ */
+static const struct recovery_ubi_geometry xg2010g_ubi_geometry = {
+	.size		= XG2010G_UBI_SIZE,
+	.erase_size	= XG2010G_UBI_ERASE_SIZE,
+	.write_size	= XG2010G_UBI_WRITE_SIZE,
+	.oob_size	= XG2010G_UBI_OOB_SIZE,
+	.ubi_part	= XG2010G_UBI_PART,
+	.version	= "2.0",
+};
+
 struct xg2010g_ubi_layout {
 	const char *version;
 	const char *part;
 };
 
 static const struct xg2010g_ubi_layout xg2010g_ubi_layouts[] = {
-	{ "2.0", XG2010G_UBI_PART },
+	{ xg2010g_ubi_geometry.version, xg2010g_ubi_geometry.ubi_part },
 };
 
 static const struct xg2010g_ubi_layout *xg2010g_active_ubi_layout =
@@ -551,10 +566,10 @@ xg2010g_find_ubi_layout(const char *part)
 
 static bool xg2010g_ubi_mtd_valid(const struct mtd_info *mtd)
 {
-	return mtd && mtd->size == XG2010G_UBI_SIZE &&
-		mtd->erasesize == XG2010G_UBI_ERASE_SIZE &&
-		mtd->writesize == XG2010G_UBI_WRITE_SIZE &&
-		mtd->oobsize == XG2010G_UBI_OOB_SIZE;
+	return mtd && mtd->size == xg2010g_ubi_geometry.size &&
+		mtd->erasesize == xg2010g_ubi_geometry.erase_size &&
+		mtd->writesize == xg2010g_ubi_geometry.write_size &&
+		mtd->oobsize == xg2010g_ubi_geometry.oob_size;
 }
 
 static bool xg2010g_bootarg_has(const char *bootargs, const char *arg)
@@ -879,6 +894,28 @@ int board_init(void)
 	gd->bd->bi_boot_params = CFG_SYS_SDRAM_BASE + 0x100;
 
 	return 0;
+}
+
+/*
+ * recovery_board_ops bridge: the recovery server in net/lwip/httpd_recovery.c
+ * resolves its board-specific behaviour through this struct rather than
+ * calling individual xg2010g_* externs.  Both Brightspeed Gemtek AN7581
+ * boards (XG2010G and XR1710G) share the NAND/UBI layout and DSD/uenv
+ * handling, so a single ops singleton covers them.
+ */
+const struct recovery_board_ops *recovery_get_board_ops(void)
+{
+	static const struct recovery_board_ops ops = {
+		.match			= xg2010g_is_compatible,
+		.ubi			= &xg2010g_ubi_geometry,
+		.detect_ubi_part	= xg2010g_detect_ubi_part,
+		.detect_ubi_version	= xg2010g_detect_ubi_version,
+		.sync_factory_part	= xg2010g_sync_factory_part,
+		.sync_factory		= xg2010g_sync_factory,
+		.mtd_ubi_valid		= xg2010g_ubi_mtd_valid,
+	};
+
+	return &ops;
 }
 
 int run_http_recovery(void);

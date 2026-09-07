@@ -4,7 +4,7 @@
 
 ifeq (y,$(CONFIG_HTTPD_RECOVERY))
 ccflags-y += -I$(srctree)/lib/lwip \
-	-DHTTPD_FSDATA_FILE=\"httpd/fsdata_xg2010g.c\" \
+	-DHTTPD_FSDATA_FILE=\"httpd/fsdata_recovery.c\" \
 	-Dfs_open=lwip_fs_open \
 	-Dfs_close=lwip_fs_close \
 	-Dfs_read=lwip_fs_read \

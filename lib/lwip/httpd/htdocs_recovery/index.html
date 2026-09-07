@@ -3,7 +3,7 @@
 <head>
 <meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>XG2010G Recovery Mode</title>
+<title>Brightspeed Gemtek Recovery Mode</title>
 <style>
 :root{
   color-scheme:light;
@@ -361,7 +361,7 @@ button,input,select{font:inherit;letter-spacing:0}
 <div class='app'>
   <aside class='sidebar'>
     <div class='brand'>
-      <strong>XG2010G Recovery Mode</strong><span>Recovery WebUI</span>
+      <strong><span id='brand-model'>Brightspeed Gemtek</span> Recovery Mode</strong><span>Recovery WebUI</span>
     </div>
     <nav class='nav' aria-label='Recovery target'>
       <button class='nav-button active' type='button' data-target='firmware' aria-current='page'><span class='nav-dot'></span>Firmware Recovery</button>
@@ -372,7 +372,7 @@ button,input,select{font:inherit;letter-spacing:0}
     </div>
     <div class='side-meta'>
       <strong>192.168.1.1</strong>
-      <a class='version-link' href='https://github.com/naoki66/u-boot-xg2010g/releases' target='_blank' rel='noopener'><span id='version'>Loading U-Boot version...</span></a>
+      <a class='version-link' href='https://github.com/naoki66/u-boot-for-brightspeed-gemtek/releases' target='_blank' rel='noopener'><span id='version'>Loading U-Boot version...</span></a>
     </div>
   </aside>
 
@@ -445,7 +445,7 @@ button,input,select{font:inherit;letter-spacing:0}
           </aside>
         </div>
       </section>
-      <footer class='footer'><a class='version-link' href='https://github.com/naoki66/u-boot-xg2010g/releases' target='_blank' rel='noopener'><span id='footer-version'>XG2010G HTTP Recovery</span></a></footer>
+      <footer class='footer'><a class='version-link' href='https://github.com/naoki66/u-boot-for-brightspeed-gemtek/releases' target='_blank' rel='noopener'><span id='footer-version'>Brightspeed Gemtek HTTP Recovery</span></a></footer>
     </div>
   </main>
 </div>
@@ -459,6 +459,23 @@ var pollTimer=null;
 var pollEpoch=0;
 var pollOutcome=0;
 
+/* The recovery pages are shared by every board that enables this server,
+   so the model is injected from /about instead of being baked into the
+   HTML. Until that arrives the shared brand name is shown. */
+var BOARD='Brightspeed Gemtek';
+var BOARD_FILE='';
+function bt(text){
+  return String(text).split('{board}').join(BOARD).split('{board-file}').join(BOARD_FILE||BOARD.toLowerCase());
+}
+function setBoard(name){
+  if(!name)return;
+  BOARD=String(name).toUpperCase();
+  BOARD_FILE=String(name).toLowerCase();
+  document.title=BOARD+' Recovery Mode';
+  var brand=document.getElementById('brand-model');
+  if(brand)brand.textContent=BOARD;
+}
+
 var profiles={
 	  firmware:{
 	    title:'Firmware Recovery',
@@ -468,22 +485,22 @@ var profiles={
 	    preserve:'Loaded from mtd1/uenv; recovery_trigger is a one-shot software flag',
 	    help:'Firmware images must be at least 1 MiB',
 	    action:'Upload and Recover',
-		    notices:['Do not power off or reboot the device during recovery!','The ubi partition is fully erased and rebuilt.','The image must match the XG2010G embedded device tree.','The device restarts automatically when recovery completes.']
+		    notices:['Do not power off or reboot the device during recovery!','The ubi partition is fully erased and rebuilt.','The image must match the {board} embedded device tree.','The device restarts automatically when recovery completes.']
   },
   uboot:{
 	    title:'Update U-Boot',
-	    copy:'Upload the complete signed 2 MiB XG2010G mtd0 bootloader image.',
+	    copy:'Upload the complete signed 2 MiB {board} mtd0 bootloader image.',
 	    target:'bootloader / mtd0 @ 0x000000',
 	    scope:'Erase and rewrite only the 2 MiB bootloader partition',
 	    preserve:'uenv, dsd, UBI firmware volumes, and reserved BMT area',
-	    help:'Use xg2010g-*-mtd0-signed.bin, not u-boot.bin or bare FIP',
+	    help:'Use {board-file}-*-mtd0-signed.bin, not u-boot.bin or bare FIP',
 	    action:'Upload and Update',
 	    notices:['Do not power off or reboot the device during the U-Boot update!','The signed mtd0 FIP header is validated before writing.','uenv, dsd, UBI firmware volumes, and reserved BMT are not modified.']
 	  }
 };
 
 var layouts={
-  '2.0':{part:'ubi',size:'440 MiB',end:'0x1be00000',help:'XG2010G UBI 2.0 layout: ubi @ 0x00600000 size 0x1b800000, with 66 MiB reserved for vendor BMT/BBT.'}
+  '2.0':{part:'ubi',size:'440 MiB',end:'0x1be00000',help:'{board} UBI 2.0 layout: ubi @ 0x00600000 size 0x1b800000, with 66 MiB reserved for vendor BMT/BBT.'}
 };
 
 var fileInput=document.getElementById('file-input');
@@ -502,7 +519,7 @@ function profile(){return profiles[activeTarget]}
 function updateLayout(){
   var layout=layouts[selectedLayout]||layouts['2.0'];
   layoutBlock.hidden=activeTarget!=='firmware';
-  layoutHelp.textContent=layout.help;
+  layoutHelp.textContent=bt(layout.help);
   layoutHelp.className='layout-help'+(layout.warning?' warning':'');
   if(activeTarget==='firmware'){
     document.getElementById('target-value').textContent=layout.part+':fit ('+layout.size+', ends '+layout.end+')';
@@ -520,19 +537,19 @@ function setTarget(target){
     if(active)buttons[i].setAttribute('aria-current','page');
     else buttons[i].removeAttribute('aria-current');
   }
-  document.getElementById('page-title').textContent=p.title;
-  document.getElementById('page-copy').textContent=p.copy;
-	  document.getElementById('target-value').textContent=p.target;
-  document.getElementById('scope-value').textContent=p.scope;
-  document.getElementById('preserve-value').textContent=p.preserve;
-  fileHelp.textContent=p.help;
+  document.getElementById('page-title').textContent=bt(p.title);
+  document.getElementById('page-copy').textContent=bt(p.copy);
+	  document.getElementById('target-value').textContent=bt(p.target);
+  document.getElementById('scope-value').textContent=bt(p.scope);
+  document.getElementById('preserve-value').textContent=bt(p.preserve);
+  fileHelp.textContent=bt(p.help);
   uploadButton.textContent=p.action;
   var list=document.getElementById('notice-list');
   list.textContent='';
 	  for(var n=0;n<p.notices.length;n++){
     var item=document.createElement('li');
 	    if(n===0)item.className='critical-warning';
-    item.textContent=p.notices[n];
+    item.textContent=bt(p.notices[n]);
     list.appendChild(item);
 	  }
 	  updateLayout();
@@ -559,7 +576,7 @@ function validateFile(){
   if(!selectedFile){
     fileName.textContent='No file selected';
     fileName.className='file-name';
-    fileHelp.textContent=profile().help;
+    fileHelp.textContent=bt(profile().help);
     statusMessage.textContent='Select an image file.';
   }else{
     fileName.textContent=selectedFile.name+'  ('+formatBytes(selectedFile.size)+')';
@@ -761,6 +778,10 @@ rebootButton.addEventListener('click',rebootToSystem);
   try{
     var response=await fetch('/about',{cache:'no-store'});
     var data=await response.json();
+	    if(data&&data.board){
+	      setBoard(data.board);
+	      setTarget(activeTarget);
+	    }
 	    var versionText=null;
 	    if(data&&data.u_boot){
 	      var hashMatch=data.u_boot.match(/-g([0-9a-f]{7,})/);
@@ -773,9 +794,9 @@ rebootButton.addEventListener('click',rebootToSystem);
 	        }
 	      }
 	      if(buildDate&&hashMatch){
-	        versionText='XG2010G U-Boot-'+buildDate+'-g'+hashMatch[1];
+	        versionText=BOARD+' U-Boot-'+buildDate+'-g'+hashMatch[1];
 	      }else{
-	        versionText=data.u_boot.replace(/^U-Boot\s+(?:[\d.]+-)?XG2010G-/,'XG2010G U-Boot-').replace(/ \(.*\)$/,'');
+	        versionText=data.u_boot.replace(/ \(.*\)$/,'');
 	      }
 	    }
 	    if(versionText){

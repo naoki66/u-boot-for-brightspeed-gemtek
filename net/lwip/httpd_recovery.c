@@ -47,13 +47,61 @@
 #include <mtd/ubi-user.h>
 #include <timer.h>
 #include <asm/io.h>
+#include "../../board/airoha/an7581/recovery.h"
 #include "../../drivers/mtd/ubi/ubi.h"
 
 DECLARE_GLOBAL_DATA_PTR;
 
-int xg2010g_sync_factory(void);
-int xg2010g_sync_factory_part(const char *part);
-const char *xg2010g_detect_ubi_version(void);
+/*
+ * Board name handed to the recovery web UI. The pages are shared by every
+ * board that enables HTTPD_RECOVERY, so the model is injected at run time
+ * instead of being baked into the HTML.
+ */
+#ifndef CONFIG_DEFAULT_DEVICE_TREE
+#define RECOVERY_BOARD_NAME "unknown"
+#else
+#define RECOVERY_BOARD_NAME CONFIG_DEFAULT_DEVICE_TREE
+#endif
+
+/*
+ * recovery_get_board_ops() is provided strong by every board that enables
+ * HTTPD_RECOVERY.  The framework calls each board-specific behaviour
+ * through this struct, so adding a new board is a matter of registering a
+ * different ops singleton -- no more extern of xg2010g_* symbols, no more
+ * duplicate UBI layout constants in this translation unit.  If a board
+ * forgets to register ops the weak default below returns NULL and the
+ * recovery server refuses to start with a clear message.
+ */
+__weak const struct recovery_board_ops *recovery_get_board_ops(void)
+{
+	return NULL;
+}
+
+static const struct recovery_board_ops *recovery_ops(void)
+{
+	/*
+	 * Cache the result so the missing-ops log fires only once per boot.
+	 * The board file registers ops before run_http_recovery() runs, so the
+	 * first call here always returns a fully populated pointer.
+	 */
+	static const struct recovery_board_ops *cached;
+	static bool logged_missing;
+
+	if (!cached && !logged_missing) {
+		const struct recovery_board_ops *ops = recovery_get_board_ops();
+
+		if (!ops) {
+			log_err("HTTP recovery: no board ops registered (CONFIG_HTTPD_RECOVERY requires recovery_get_board_ops()); recovery disabled\n");
+			logged_missing = true;
+			return NULL;
+		}
+
+		cached = ops;
+	}
+
+	return cached;
+}
+
 const char *an7581_release_version(void);
 const char *an7581_release_credit(void);
 
@@ -86,10 +134,12 @@ unsigned long airoha_recovery_get_lan_activity_ms(void)
 #define RECOVERY_UPLOAD_MAX    (64 * 1024 * 1024UL)
 #define RECOVERY_MIN_FIRMWARE_SIZE (1 * 1024 * 1024UL)
 #define RECOVERY_MAX_UBOOT_SIZE    (2 * 1024 * 1024UL)
-#define RECOVERY_XG2010G_UBI_SIZE  0x1b800000ULL
-#define RECOVERY_XG2010G_UBI_ERASE_SIZE 0x20000U
-#define RECOVERY_XG2010G_UBI_WRITE_SIZE 0x800U
-#define RECOVERY_XG2010G_UBI_OOB_SIZE 0x80U
+/*
+ * The on-NAND UBI geometry (size/erase/write/oob/part/version) used to live
+ * here as RECOVERY_XG2010G_UBI_* macros.  It now lives in
+ * &struct recovery_ubi_geometry inside the board file: this translation unit
+ * only reads it through recovery_ops()->ubi / recovery_ops()->mtd_ubi_valid.
+ */
 
 /* Delay before reboot after flashing completes, to let browser finish reads */
 #define REBOOT_DELAY_MS        3000
@@ -235,28 +285,40 @@ struct recovery_ubi_layout {
 	const char *part;
 };
 
-static const struct recovery_ubi_layout recovery_ubi_layouts[] = {
-	{ "2.0", "ubi" },
-};
+/*
+ * The single supported layout comes from the registered board's
+ * &struct recovery_ubi_geometry.  The framework keeps an indirection so
+ * future boards can publish more than one layout via a richer ops API.
+ */
+static struct recovery_ubi_layout recovery_ubi_layout =
+	{ .version = NULL, .part = NULL };
 
-static const struct recovery_ubi_layout *current_ubi_layout =
-	&recovery_ubi_layouts[0];
+static const struct recovery_ubi_layout *current_ubi_layout = &recovery_ubi_layout;
 
-static bool recovery_is_xg2010g(void)
+static void recovery_init_layout_from_ops(const struct recovery_board_ops *ops)
 {
-	return of_machine_is_compatible("naoki,xg2010g") ||
-	       of_machine_is_compatible("econet,xg2010g") ||
-	       of_machine_is_compatible("econet,xg2010g-ubi") ||
-	       of_machine_is_compatible("gemtek,xg2010g") ||
-	       of_machine_is_compatible("gemtek,xg2010g-ubi");
+	if (!ops || !ops->ubi)
+		return;
+
+	recovery_ubi_layout.version = ops->ubi->version;
+	recovery_ubi_layout.part = ops->ubi->ubi_part;
+	current_ubi_layout = &recovery_ubi_layout;
 }
 
-static bool recovery_xg2010g_ubi_mtd_valid(const struct mtd_info *mtd)
+static bool recovery_board_active(void)
 {
-	return mtd && mtd->size == RECOVERY_XG2010G_UBI_SIZE &&
-		mtd->erasesize == RECOVERY_XG2010G_UBI_ERASE_SIZE &&
-		mtd->writesize == RECOVERY_XG2010G_UBI_WRITE_SIZE &&
-		mtd->oobsize == RECOVERY_XG2010G_UBI_OOB_SIZE;
+	const struct recovery_board_ops *ops = recovery_ops();
+
+	if (!ops || !ops->match)
+		return false;
+
+	if (!ops->match())
+		return false;
+
+	if (ops->ubi)
+		recovery_init_layout_from_ops(ops);
+
+	return true;
 }
 
 enum recovery_backend {
@@ -1740,7 +1802,7 @@ static const char *recovery_ubi_part(enum upload_target tgt)
 
 	/* XG2010G deliberately has one project layout; never target a
 	 * legacy ubi1.x partition through an overridden environment. */
-	if (tgt == TARGET_FIRMWARE && recovery_is_xg2010g())
+	if (tgt == TARGET_FIRMWARE && recovery_board_active())
 		return "ubi";
 
 	if (tgt == TARGET_FIRMWARE && current_ubi_layout)
@@ -1764,10 +1826,14 @@ static const char *recovery_ubi_part(enum upload_target tgt)
 
 static int recovery_parse_ubi_layout(const char *uri)
 {
+	bool active = recovery_board_active();
 	const char *query;
-	int i;
 
-	current_ubi_layout = &recovery_ubi_layouts[0];
+	if (active)
+		current_ubi_layout = &recovery_ubi_layout;
+	else
+		current_ubi_layout = NULL;
+
 	query = strchr(uri, '?');
 	if (!query)
 		return 0;
@@ -1775,17 +1841,12 @@ static int recovery_parse_ubi_layout(const char *uri)
 	if (strncmp(query, "?layout=", 8))
 		return -EINVAL;
 	query += 8;
-	if (recovery_is_xg2010g() && strcmp(query, "2.0"))
+
+	if (!active || strcmp(query, recovery_ubi_layout.version))
 		return -EINVAL;
 
-	for (i = 0; i < ARRAY_SIZE(recovery_ubi_layouts); i++) {
-		if (!strcmp(query, recovery_ubi_layouts[i].version)) {
-			current_ubi_layout = &recovery_ubi_layouts[i];
-			return 0;
-		}
-	}
-
-	return -EINVAL;
+	current_ubi_layout = &recovery_ubi_layout;
+	return 0;
 }
 
 static int recovery_select_ubi(const char *part)
@@ -1800,8 +1861,8 @@ static int recovery_select_ubi(const char *part)
 	ubi = ubi_get_device(0);
 	if (ubi) {
 		selected = ubi->mtd && !strcmp(ubi->mtd->name, part);
-		if (selected && recovery_is_xg2010g() &&
-		    !recovery_xg2010g_ubi_mtd_valid(ubi->mtd)) {
+		if (selected && recovery_board_active() &&
+		    !recovery_ops()->mtd_ubi_valid(ubi->mtd)) {
 			ubi_put_device(ubi);
 			return -EINVAL;
 		}
@@ -1816,9 +1877,9 @@ static int recovery_select_ubi(const char *part)
 	ret = ubi_part((char *)part, NULL);
 	if (ret)
 		recovery_ubi_attach_error = ret;
-	else if (recovery_is_xg2010g()) {
+	else if (recovery_board_active()) {
 		ubi = ubi_get_device(0);
-		if (!ubi || !recovery_xg2010g_ubi_mtd_valid(ubi->mtd)) {
+		if (!ubi || !recovery_ops()->mtd_ubi_valid(ubi->mtd)) {
 			if (ubi)
 				ubi_put_device(ubi);
 			recovery_ubi_attach_error = -EINVAL;
@@ -1840,7 +1901,7 @@ static int recovery_try_ubi_target(enum upload_target tgt,
 	const char *volume;
 	const char *part = recovery_ubi_part(tgt);
 
-	if (tgt == TARGET_FIRMWARE && recovery_is_xg2010g())
+	if (tgt == TARGET_FIRMWARE && recovery_board_active())
 		volume = "fit";
 	else {
 		volume = env_get(recovery_target_env(tgt));
@@ -1853,8 +1914,8 @@ static int recovery_try_ubi_target(enum upload_target tgt,
 		mtd = get_mtd_device_nm(part);
 		if (IS_ERR_OR_NULL(mtd))
 			return -ENODEV;
-		if (recovery_is_xg2010g() &&
-		    !recovery_xg2010g_ubi_mtd_valid(mtd)) {
+		if (recovery_board_active() &&
+		    !recovery_ops()->mtd_ubi_valid(mtd)) {
 			printf("Recovery: refusing XG2010G UBI partition with unexpected geometry\n");
 			put_mtd_device(mtd);
 			return -EINVAL;
@@ -1915,7 +1976,7 @@ static int recovery_resolve_target(enum upload_target tgt,
 
 	memset(target, 0, sizeof(*target));
 
-	if (tgt == TARGET_FIRMWARE && recovery_is_xg2010g())
+	if (tgt == TARGET_FIRMWARE && recovery_board_active())
 		name = "fit";
 	else {
 		name = env_get(recovery_target_env(tgt));
@@ -1951,7 +2012,7 @@ static int recovery_resolve_target(enum upload_target tgt,
 	raw = env_get(recovery_raw_env(tgt));
 	if (!raw || !*raw)
 		raw = recovery_default_raw(tgt);
-	if (!(tgt == TARGET_FIRMWARE && recovery_is_xg2010g()) && raw && *raw) {
+	if (!(tgt == TARGET_FIRMWARE && recovery_board_active()) && raw && *raw) {
 		mtd = get_mtd_device_nm(raw);
 		if (!IS_ERR_OR_NULL(mtd)) {
 			ulong size_cap = recovery_target_size_cap(tgt);
@@ -1971,7 +2032,7 @@ static int recovery_resolve_target(enum upload_target tgt,
 		}
 	}
 
-	if (!(tgt == TARGET_FIRMWARE && recovery_is_xg2010g()))
+	if (!(tgt == TARGET_FIRMWARE && recovery_board_active()))
 		mtd = get_mtd_device_nm(name);
 	else
 		mtd = NULL;
@@ -1986,7 +2047,7 @@ static int recovery_resolve_target(enum upload_target tgt,
 
 	if (!recovery_try_ubi_target(tgt, target))
 		return 0;
-	if (tgt == TARGET_FIRMWARE && recovery_is_xg2010g())
+	if (tgt == TARGET_FIRMWARE && recovery_board_active())
 		return -ENODEV;
 
 	if (!raw) {
@@ -3002,20 +3063,22 @@ int fs_open_custom(struct fs_file *file, const char *name)
 	        return 1;
 	    }
 	    else if (!strcmp(p, "about")) {
-	        char json[320];
+	        char json[384];
 	        int json_len =
 #ifdef U_BOOT_DATE
 	            snprintf(json, sizeof(json),
-	                     "{\"u_boot\":\"%s (%s - %s %s)\",\"recovery_version\":\"%s\",\"credit\":\"%s\",\"detected_layout\":\"%s\"}\n",
+	                     "{\"board\":\"%s\",\"u_boot\":\"%s (%s - %s %s)\",\"recovery_version\":\"%s\",\"credit\":\"%s\",\"detected_layout\":\"%s\"}\n",
+	                     RECOVERY_BOARD_NAME,
 	                     U_BOOT_VERSION, U_BOOT_DATE, U_BOOT_TIME, U_BOOT_TZ,
 	                     an7581_release_version(), an7581_release_credit(),
-	                     xg2010g_detect_ubi_version());
+	                     recovery_ops()->detect_ubi_version());
 #else
 	            snprintf(json, sizeof(json),
-	                     "{\"u_boot\":\"%s\",\"recovery_version\":\"%s\",\"credit\":\"%s\",\"detected_layout\":\"%s\"}\n",
+	                     "{\"board\":\"%s\",\"u_boot\":\"%s\",\"recovery_version\":\"%s\",\"credit\":\"%s\",\"detected_layout\":\"%s\"}\n",
+	                     RECOVERY_BOARD_NAME,
 	                     U_BOOT_VERSION, an7581_release_version(),
 	                     an7581_release_credit(),
-	                     xg2010g_detect_ubi_version());
+	                     recovery_ops()->detect_ubi_version());
 #endif
         if (json_len < 0)
             return 0;
@@ -3235,7 +3298,9 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
     /* Leave response_uri untouched here so the POST can complete normally. */
     if (current_target == TARGET_FIRMWARE)
         printf("httpd: accepting %u-byte firmware for UBI %s\n",
-               recv_total, current_ubi_layout->version);
+               recv_total,
+               current_ubi_layout && current_ubi_layout->version
+                       ? current_ubi_layout->version : "unknown");
     else
         printf("httpd: accepting %u-byte U-Boot image\n", recv_total);
     return ERR_OK;
@@ -3411,8 +3476,9 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 	    target.backend == RECOVERY_BACKEND_UBI) {
 		ret = recovery_force_ubi_rebuild(&target);
 		if (ret) {
-			printf("Failed to select UBI %s rebuild target: %d\n",
-			       current_ubi_layout->version, ret);
+printf("Failed to select UBI %s rebuild target: %d\n",
+                       current_ubi_layout && current_ubi_layout->version
+                               ? current_ubi_layout->version : "unknown", ret);
 			recovery_release_target(&target);
 			prog_phase = -1;
 			return ret;
@@ -3436,7 +3502,9 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 
 		if (current_target == TARGET_FIRMWARE)
 			printf("Recovery mode: recreating UBI %s on '%s'.\n",
-			       current_ubi_layout->version, target.ubi_part);
+			       current_ubi_layout && current_ubi_layout->version
+			               ? current_ubi_layout->version : "unknown",
+			       target.ubi_part);
 
 		ret = recovery_prepare_ubi_target(&target, status_leds, image_size,
 						      &reformatted);
@@ -3519,7 +3587,7 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		recovery_release_target(&target);
 		prog_phase = 3;
 		if (current_target == TARGET_FIRMWARE)
-			xg2010g_sync_factory_part(target.ubi_part);
+			recovery_ops()->sync_factory_part(target.ubi_part);
 		return 0;
 	}
 
@@ -3563,7 +3631,7 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 	recovery_release_target(&target);
 	prog_phase = 3;
 	if (current_target == TARGET_FIRMWARE)
-		xg2010g_sync_factory();
+		recovery_ops()->sync_factory();
 	return 0;
 }
 
