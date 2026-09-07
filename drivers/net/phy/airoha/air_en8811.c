@@ -371,6 +371,16 @@ static int en8811h_wait_mcu_ready(struct phy_device *phydev)
 	return ret;
 }
 
+static bool en8811h_mcu_ready(struct phy_device *phydev)
+{
+	int reg_value;
+
+	reg_value = phy_read_mmd(phydev, MDIO_MMD_VEND1,
+				 EN8811H_PHY_FW_STATUS);
+
+	return reg_value == EN8811H_PHY_READY;
+}
+
 static int an8811hb_check_crc(struct phy_device *phydev,
 			      u32 set1, u32 mon2, u32 mon3)
 {
@@ -937,6 +947,12 @@ static int en8811h_config(struct phy_device *phydev)
 		ret = en8811h_restart_mcu(phydev);
 		if (ret < 0)
 			return ret;
+	} else if (en8811h_mcu_ready(phydev)) {
+		air_phy_buckpbus_reg_read(phydev, EN8811H_FW_VERSION,
+					  &priv->firmware_version);
+		dev_info(phydev->dev, "MD32 firmware already running: %08x\n",
+			 priv->firmware_version);
+		priv->mcu_needs_restart = true;
 	} else {
 		ret = en8811h_load_firmware(phydev);
 		if (ret) {

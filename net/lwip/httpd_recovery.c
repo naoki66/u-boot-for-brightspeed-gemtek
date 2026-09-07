@@ -431,7 +431,8 @@ static struct recovery_dhcp_server *recovery_rx_srv;
  *   XG2010G:
  *     eth0/gdm4 -> FE MDIO PHY5   (RTL8261N, clause 45)
  *     eth1/gdm1 -> switch CPU port (fixed link, always up)
- *     eth2/gdm2 -> FE MDIO PHY8   (RTL8261N, clause 45)
+ *     eth2/gdm3 -> FE MDIO PHY8   (RTL8261N, clause 45)
+ *     eth3/gdm4 -> FE MDIO PHY15  (EN8811H, USB1 XSI)
  *   XR1710G:
  *     eth0/gdm4 -> FE MDIO PHY5   (RTL8261N, clause 45)
  *     eth1/gdm1 -> switch CPU port (fixed link, always up)
@@ -451,6 +452,7 @@ struct recovery_phy_map {
 static const struct recovery_phy_map recovery_phy_map_xg2010g[] = {
 	{ 0, false, 5 },
 	{ 2, false, 8 },
+	{ 3, false, 0xf },
 };
 
 static const struct recovery_phy_map recovery_phy_map_xr1710g[] = {

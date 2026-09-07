@@ -61,6 +61,25 @@
 
 #define RTL8201F_RMSR			0x10
 
+#define RTL8261N_PHY_ID			0x1ccaf3
+#define RTL8261N_PHYSR			0xa434
+#define RTL8261N_PHYSR_LINK		BIT(2)
+#define RTL8261N_PHYSR_DUPLEX		BIT(3)
+#define RTL8261N_PHYSR_SPEED(val)	(((((val) >> 9) & 0x3) << 2) | \
+					 (((val) >> 4) & 0x3))
+#define RTL8261N_SPEED_100M		0x1
+#define RTL8261N_SPEED_1000M		0x2
+#define RTL8261N_SPEED_2500M		0x5
+#define RTL8261N_SPEED_5G		0x6
+#define RTL8261N_SPEED_10G		0x4
+
+#define RTL8261N_AN_1000T_CTRL		0xa412
+#define RTL8261N_AN_1000T_FD		BIT(9)
+#define RTL8261N_AN_MULTI_GBT_CTRL	0x20
+#define RTL8261N_AN_2500T_FD		BIT(7)
+#define RTL8261N_AN_5000T_FD		BIT(8)
+#define RTL8261N_AN_10000T_FD		BIT(12)
+
 #define RMSR_RX_TIMING_SHIFT		BIT(2)
 #define RMSR_RX_TIMING_MASK		GENMASK(7, 4)
 #define RMSR_RX_TIMING_VAL		0x4
@@ -269,6 +288,56 @@ static int rtl8211f_config(struct phy_device *phydev)
 	return 0;
 }
 
+static int rtl8261n_config(struct phy_device *phydev)
+{
+	int ret;
+
+	phydev->supported = PHY_10G_FEATURES | SUPPORTED_2500baseX_Full |
+			    SUPPORTED_Pause | SUPPORTED_Asym_Pause;
+	phydev->advertising = PHY_100BT_FEATURES | PHY_1000BT_FEATURES |
+			      SUPPORTED_2500baseX_Full |
+			      SUPPORTED_10000baseT_Full |
+			      SUPPORTED_Autoneg | SUPPORTED_TP |
+			      SUPPORTED_Pause | SUPPORTED_Asym_Pause;
+
+	ret = gen10g_discover_mmds(phydev);
+	if (ret)
+		return ret;
+
+	/*
+	 * The vendor OpenWrt stack advertises RTL8261N 1G through vendor
+	 * MMD31 register 0xa412 and 2.5G/5G/10G through AN register 0x20.
+	 * Keep 5G disabled because the Airoha PCS code in U-Boot does not
+	 * currently have a SPEED_5000 path.
+	 */
+	ret = phy_modify_mmd(phydev, MDIO_MMD_AN, MDIO_AN_ADVERTISE,
+			     ADVERTISE_10HALF | ADVERTISE_10FULL |
+			     ADVERTISE_100HALF | ADVERTISE_100FULL |
+			     ADVERTISE_PAUSE_CAP | ADVERTISE_PAUSE_ASYM,
+			     ADVERTISE_100HALF | ADVERTISE_100FULL |
+			     ADVERTISE_PAUSE_CAP | ADVERTISE_PAUSE_ASYM);
+	if (ret)
+		return ret;
+
+	ret = phy_modify_mmd(phydev, MDIO_MMD_VEND2, RTL8261N_AN_1000T_CTRL,
+			     RTL8261N_AN_1000T_FD, RTL8261N_AN_1000T_FD);
+	if (ret)
+		return ret;
+
+	ret = phy_modify_mmd(phydev, MDIO_MMD_AN,
+			     RTL8261N_AN_MULTI_GBT_CTRL,
+			     RTL8261N_AN_2500T_FD | RTL8261N_AN_5000T_FD |
+			     RTL8261N_AN_10000T_FD,
+			     RTL8261N_AN_2500T_FD |
+			     RTL8261N_AN_10000T_FD);
+	if (ret)
+		return ret;
+
+	return phy_modify_mmd(phydev, MDIO_MMD_AN, MDIO_CTRL1,
+			      MDIO_AN_CTRL1_ENABLE | MDIO_AN_CTRL1_RESTART,
+			      MDIO_AN_CTRL1_ENABLE | MDIO_AN_CTRL1_RESTART);
+}
+
 static int rtl8211x_parse_status(struct phy_device *phydev)
 {
 	unsigned int speed;
@@ -371,6 +440,51 @@ static int rtl8211f_parse_status(struct phy_device *phydev)
 	return 0;
 }
 
+static int rtl8261n_parse_status(struct phy_device *phydev)
+{
+	int reg, speed, speed_code;
+
+	reg = phy_read_mmd(phydev, MDIO_MMD_VEND2, RTL8261N_PHYSR);
+	if (reg < 0)
+		return reg;
+
+	phydev->link = !!(reg & RTL8261N_PHYSR_LINK);
+	phydev->duplex = (reg & RTL8261N_PHYSR_DUPLEX) ?
+			  DUPLEX_FULL : DUPLEX_HALF;
+	speed_code = RTL8261N_PHYSR_SPEED(reg);
+
+	switch (speed_code) {
+	case RTL8261N_SPEED_100M:
+		speed = SPEED_100;
+		break;
+	case RTL8261N_SPEED_1000M:
+		speed = SPEED_1000;
+		break;
+	case RTL8261N_SPEED_2500M:
+		speed = SPEED_2500;
+		break;
+	case RTL8261N_SPEED_10G:
+		speed = SPEED_10000;
+		break;
+	case RTL8261N_SPEED_5G:
+		debug("RTL8261N: 5G link is not supported by this PCS\n");
+		phydev->link = 0;
+		speed = SPEED_10000;
+		break;
+	default:
+		if (phydev->link)
+			debug("RTL8261N: unknown link speed code 0x%x\n",
+			      speed_code);
+		phydev->link = 0;
+		speed = SPEED_10000;
+		break;
+	}
+
+	phydev->speed = speed;
+
+	return 0;
+}
+
 static int rtl8211x_startup(struct phy_device *phydev)
 {
 	int ret;
@@ -394,6 +508,37 @@ static int rtl8211f_startup(struct phy_device *phydev)
 	/* Read the Status (2x to make sure link is right) */
 
 	return rtl8211f_parse_status(phydev);
+}
+
+static int rtl8261n_startup(struct phy_device *phydev)
+{
+	int i = 0;
+	int ret;
+
+	ret = rtl8261n_parse_status(phydev);
+	if (ret)
+		return ret;
+
+	if (phydev->link)
+		return 0;
+
+	puts("Waiting for RTL8261N link");
+	while (!phydev->link && i < PHY_AUTONEGOTIATE_TIMEOUT) {
+		if ((i++ % 1000) == 0)
+			putc('.');
+		udelay(1000);
+
+		ret = rtl8261n_parse_status(phydev);
+		if (ret)
+			return ret;
+	}
+
+	if (!phydev->link)
+		puts(" TIMEOUT !\n");
+	else
+		puts(" done\n");
+
+	return 0;
 }
 
 /* Support for RTL8211B PHY */
@@ -457,6 +602,20 @@ U_BOOT_PHY_DRIVER(rtl8211fvd) = {
 	.shutdown = &genphy_shutdown,
 	.readext = &rtl8211f_phy_extread,
 	.writeext = &rtl8211f_phy_extwrite,
+};
+
+/* Support for RTL8261N 10G PHY */
+U_BOOT_PHY_DRIVER(rtl8261n) = {
+	.name = "RealTek RTL8261N",
+	.uid = RTL8261N_PHY_ID,
+	.mask = 0xffffff,
+	.features = PHY_10G_FEATURES | SUPPORTED_2500baseX_Full |
+		    SUPPORTED_Pause | SUPPORTED_Asym_Pause,
+	.mmds = MDIO_DEVS_PMAPMD | MDIO_DEVS_PCS | MDIO_DEVS_PHYXS |
+		MDIO_DEVS_AN | MDIO_DEVS_VEND2,
+	.config = &rtl8261n_config,
+	.startup = &rtl8261n_startup,
+	.shutdown = &gen10g_shutdown,
 };
 
 /* Support for RTL8201F PHY */

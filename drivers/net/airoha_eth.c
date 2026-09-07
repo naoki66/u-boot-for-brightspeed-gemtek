@@ -30,6 +30,7 @@
 #include "airoha/pcs-airoha.h"
 
 #define AIROHA_MAX_NUM_GDM_PORTS	4
+#define AIROHA_MAX_GDM_PORT_INSTANCES	2
 #define AIROHA_MAX_NUM_QDMA		1
 #define AIROHA_MAX_NUM_RSTS		3
 #define AIROHA_MAX_NUM_XSI_RSTS		4
@@ -43,7 +44,7 @@
 #define TX_DSCP_NUM			16
 #define RX_DSCP_NUM			PKTBUFSRX
 
-#define AIROHA_GDM_PORT_STRING_LEN	sizeof("airoha-gdmX")
+#define AIROHA_GDM_PORT_STRING_LEN	sizeof("airoha-gdmX.Y")
 
 /* SCU */
 #define SCU_SHARE_FEMEM_SEL		0x958
@@ -329,6 +330,13 @@ struct airoha_gdm_port {
 	bool neg_mode;
 
 	struct phy_device *phydev;
+
+	bool has_xsi_channel;
+	bool has_xsi_nboq;
+	bool has_xsi_src_port;
+	u8 xsi_channel;
+	u8 xsi_nboq;
+	u8 xsi_src_port;
 };
 
 struct airoha_eth {
@@ -342,7 +350,10 @@ struct airoha_eth {
 	struct airoha_eth_soc_data *soc;
 
 	struct airoha_qdma qdma[AIROHA_MAX_NUM_QDMA];
-	char gdm_port_str[AIROHA_MAX_NUM_GDM_PORTS + 1][AIROHA_GDM_PORT_STRING_LEN];
+	u8 gdm_port_count[AIROHA_MAX_NUM_GDM_PORTS + 1];
+	char gdm_port_str[AIROHA_MAX_NUM_GDM_PORTS + 1]
+			 [AIROHA_MAX_GDM_PORT_INSTANCES]
+			 [AIROHA_GDM_PORT_STRING_LEN];
 };
 
 struct airoha_eth_soc_data {
@@ -442,6 +453,29 @@ static int airoha_get_fe_port(struct airoha_gdm_port *port)
 	default:
 		return port->id == 4 ? FE_PSE_PORT_GDM4 : port->id;
 	}
+}
+
+static int airoha_read_optional_u8(struct udevice *dev, const char *prop,
+				   u8 max, u8 *value, bool *present)
+{
+	u32 val;
+	int ret;
+
+	ret = dev_read_u32(dev, prop, &val);
+	if (ret == -EINVAL || ret == -ENOENT)
+		return 0;
+	if (ret)
+		return ret;
+
+	if (val > max) {
+		debug("%s: invalid %s value %u\n", dev->name, prop, val);
+		return -EINVAL;
+	}
+
+	*value = val;
+	*present = true;
+
+	return 0;
 }
 
 static void airoha_fe_maccr_init(struct airoha_gdm_port *port)
@@ -713,16 +747,17 @@ static int airoha_pcs_init(struct udevice *dev)
 	const char *managed;
 	int ret;
 
+	if (!dev_read_u32_default(dev, "pcs", 0))
+		return 0;
+
 	ret = uclass_get_device_by_phandle(UCLASS_MISC, dev, "pcs",
 					   &pcs_dev);
 	if (ret || !pcs_dev)
 		return ret;
 
 	port->pcs_dev = pcs_dev;
-	port->mode = dev_read_phy_mode(dev);
 	managed = dev_read_string(dev, "managed");
-	port->neg_mode = !strncmp(managed, "in-band-status",
-				  sizeof("in-band-status"));
+	port->neg_mode = managed && !strcmp(managed, "in-band-status");
 
 	airoha_pcs_pre_config(pcs_dev, port->mode);
 
@@ -820,6 +855,7 @@ static int airoha_alloc_gdm_port(struct udevice *dev, ofnode node)
 	char *str;
 	int ret;
 	u32 id;
+	u8 instance;
 
 	gdm_drv = lists_driver_lookup_name("airoha-eth-port");
 	if (!gdm_drv)
@@ -837,9 +873,18 @@ static int airoha_alloc_gdm_port(struct udevice *dev, ofnode node)
 		return -ENOTSUPP;
 #endif
 
-	str = eth->gdm_port_str[id];
-	snprintf(str, AIROHA_GDM_PORT_STRING_LEN,
-		 "airoha-gdm%d", id);
+	instance = eth->gdm_port_count[id];
+	if (instance >= AIROHA_MAX_GDM_PORT_INSTANCES)
+		return -EINVAL;
+
+	str = eth->gdm_port_str[id][instance];
+	if (instance)
+		snprintf(str, AIROHA_GDM_PORT_STRING_LEN,
+			 "airoha-gdm%d.%u", id, instance);
+	else
+		snprintf(str, AIROHA_GDM_PORT_STRING_LEN,
+			 "airoha-gdm%d", id);
+	eth->gdm_port_count[id]++;
 
 	return device_bind_with_driver_data(dev, gdm_drv, str,
 					    (ulong)eth, node, &gdm_dev);
@@ -965,8 +1010,34 @@ static int airoha_eth_probe(struct udevice *dev)
 static int airoha_eth_port_of_to_plat(struct udevice *dev)
 {
 	struct airoha_gdm_port *port = dev_get_priv(dev);
+	u32 id;
+	int ret;
 
-	return dev_read_u32(dev, "reg", &port->id);
+	ret = dev_read_u32(dev, "reg", &id);
+	if (ret)
+		return ret;
+	port->id = id;
+
+	port->mode = dev_read_phy_mode(dev);
+
+	ret = airoha_read_optional_u8(dev, "airoha,xsi-channel",
+				      FIELD_MAX(QDMA_ETH_TXMSG_CHAN_MASK),
+				      &port->xsi_channel,
+				      &port->has_xsi_channel);
+	if (ret)
+		return ret;
+
+	ret = airoha_read_optional_u8(dev, "airoha,xsi-nboq",
+				      FIELD_MAX(QDMA_ETH_TXMSG_NBOQ_MASK),
+				      &port->xsi_nboq,
+				      &port->has_xsi_nboq);
+	if (ret)
+		return ret;
+
+	return airoha_read_optional_u8(dev, "airoha,xsi-src-port",
+				       FIELD_MAX(QDMA_ETH_RXMSG_SPORT_MASK),
+				       &port->xsi_src_port,
+				       &port->has_xsi_src_port);
 }
 
 static int airoha_eth_port_probe(struct udevice *dev)
@@ -1060,8 +1131,9 @@ static int airoha_eth_init(struct udevice *dev)
 			}
 		}
 
-		airoha_pcs_link_up(port->pcs_dev, port->neg_mode, port->mode,
-				   speed, duplex);
+		if (port->pcs_dev)
+			airoha_pcs_link_up(port->pcs_dev, port->neg_mode,
+					   port->mode, speed, duplex);
 	}
 #endif
 
@@ -1078,7 +1150,8 @@ static void airoha_eth_stop(struct udevice *dev)
 		if (port->phydev)
 			phy_shutdown(port->phydev);
 
-		airoha_pcs_link_down(port->pcs_dev);
+		if (port->pcs_dev)
+			airoha_pcs_link_down(port->pcs_dev);
 	}
 #endif
 
@@ -1114,9 +1187,13 @@ static int airoha_eth_send(struct udevice *dev, void *packet, int length)
 
 	fport = airoha_get_fe_port(port);
 
-	msg0 = 0;
+	msg0 = port->has_xsi_channel ?
+	       FIELD_PREP(QDMA_ETH_TXMSG_CHAN_MASK, port->xsi_channel) : 0;
 	msg1 = FIELD_PREP(QDMA_ETH_TXMSG_FPORT_MASK, fport) |
 	       FIELD_PREP(QDMA_ETH_TXMSG_METER_MASK, 0x7f);
+	if (port->has_xsi_nboq)
+		msg1 |= FIELD_PREP(QDMA_ETH_TXMSG_NBOQ_MASK,
+				    port->xsi_nboq);
 
 	val = FIELD_PREP(QDMA_DESC_LEN_MASK, length);
 	WRITE_ONCE(desc->ctrl, cpu_to_le32(val));
@@ -1152,6 +1229,37 @@ static int airoha_eth_send(struct udevice *dev, void *packet, int length)
 	return 0;
 }
 
+static void airoha_qdma_release_rx_desc(struct airoha_qdma *qdma,
+					struct airoha_queue *q, int qid)
+{
+	/*
+	 * Due to cpu cache issue the airoha_qdma_reset_rx_desc() function
+	 * will always touch 2 descriptors placed on the same cacheline:
+	 *   - if current descriptor is even, then current and next
+	 *     descriptors will be touched
+	 *   - if current descriptor is odd, then current and previous
+	 *     descriptors will be touched
+	 *
+	 * Thus, to prevent possible destroying of rx queue, we should:
+	 *   - do nothing in the even descriptor case,
+	 *   - utilize 2 descriptors (current and previous one) in the
+	 *     odd descriptor case.
+	 *
+	 * WARNING: Observations shows that PKTBUFSRX must be even and
+	 *          larger than 7 for reliable driver operations.
+	 */
+	if (q->head & 0x01) {
+		airoha_qdma_reset_rx_desc(q, q->head - 1);
+		airoha_qdma_reset_rx_desc(q, q->head);
+
+		airoha_qdma_rmw(qdma, REG_RX_CPU_IDX(qid),
+				RX_RING_CPU_IDX_MASK,
+				FIELD_PREP(RX_RING_CPU_IDX_MASK, q->head));
+	}
+
+	q->head = (q->head + 1) % q->ndesc;
+}
+
 static int airoha_eth_recv(struct udevice *dev, int flags, uchar **packetp)
 {
 	struct airoha_gdm_port *port = dev_get_priv(dev);
@@ -1175,6 +1283,16 @@ static int airoha_eth_recv(struct udevice *dev, int flags, uchar **packetp)
 	dma_unmap_single(desc->addr, length,
 			 DMA_FROM_DEVICE);
 
+	if (port->has_xsi_src_port) {
+		u32 rxmsg1 = le32_to_cpu(READ_ONCE(desc->msg1));
+		u8 sport = FIELD_GET(QDMA_ETH_RXMSG_SPORT_MASK, rxmsg1);
+
+		if (sport != port->xsi_src_port) {
+			airoha_qdma_release_rx_desc(qdma, q, qid);
+			return -EAGAIN;
+		}
+	}
+
 	*packetp = phys_to_virt(desc->addr);
 
 	return length;
@@ -1193,31 +1311,7 @@ static int arht_eth_free_pkt(struct udevice *dev, uchar *packet, int length)
 	qid = 0;
 	q = &qdma->q_rx[qid];
 
-	/*
-	 * Due to cpu cache issue the airoha_qdma_reset_rx_desc() function
-	 * will always touch 2 descriptors placed on the same cacheline:
-	 *   - if current descriptor is even, then current and next
-	 *     descriptors will be touched
-	 *   - if current descriptor is odd, then current and previous
-	 *     descriptors will be touched
-	 *
-	 * Thus, to prevent possible destroying of rx queue, we should:
-	 *   - do nothing in the even descriptor case,
-	 *   - utilize 2 descriptors (current and previous one) in the
-	 *     odd descriptor case.
-	 *
-	 * WARNING: Observations shows that PKTBUFSRX must be even and
-	 *          larger than 7 for reliable driver operations.
-	 */
-	if (q->head & 0x01) {
-		airoha_qdma_reset_rx_desc(q, q->head - 1);
-		airoha_qdma_reset_rx_desc(q, q->head);
-
-		airoha_qdma_rmw(qdma, REG_RX_CPU_IDX(qid), RX_RING_CPU_IDX_MASK,
-				FIELD_PREP(RX_RING_CPU_IDX_MASK, q->head));
-	}
-
-	q->head = (q->head + 1) % q->ndesc;
+	airoha_qdma_release_rx_desc(qdma, q, qid);
 
 	return 0;
 }

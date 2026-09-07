@@ -390,6 +390,11 @@ EN7581 使用六个独立的 ``serdes_*`` 参数。每个值是 12 位十六进�
 独立配置。原厂 ``serdes_ethernet=411`` 不应改成 ``421``，后者会把 Ethernet
 SerDes 的角色从 LAN 改成 WAN，和原厂 TTL 及端口映射不符。
 
+对应到本仓库 U-Boot recovery：``gdm4`` + FE MDIO ``phy5`` 是 LAN1/WAN
+10G RTL8261N 口，``gdm3`` + FE MDIO ``phy8`` 是 LAN2 10G RTL8261N 口。
+LAN3 是原厂 ``eth0.5`` 的 USB1 XSI/HSGMII 通道，复用 ``gdm4`` 但使用
+独立的 QDMA/XSI 子通道，外接 MDIO ``0x0f`` 的 EN8811H 2.5G PHY。
+
 校核依据
 ~~~~~~~~
 

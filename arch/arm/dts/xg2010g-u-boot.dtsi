@@ -14,7 +14,8 @@
 	aliases {
 		ethernet0 = &gdm4;
 		ethernet1 = &gdm1;
-		ethernet2 = &gdm2;
+		ethernet2 = &gdm3;
+		ethernet3 = &gdm4_usb;
 	};
 };
 
@@ -61,6 +62,7 @@
 		phyf: ethernet-phy@f {
 			compatible = "ethernet-phy-ieee802.3-c22";
 			reg = <0xf>;
+			status = "okay";
 		};
 	};
 };
@@ -69,17 +71,40 @@
 	status = "okay";
 };
 
-&gdm2 {
+/* LAN2: vendor eth0.7 / hsgmii_lan_pcie1, RTL8261N at FE MDIO 8. */
+&gdm3 {
 	status = "okay";
 	managed = "in-band-status";
-	phy-mode = "10gbase-r";
+	phy-mode = "usxgmii";
+	phy-handle = <&phy8>;
+	airoha,xsi-channel = <11>;
+	airoha,xsi-nboq = <5>;
+	airoha,xsi-src-port = <0x17>;
 };
 
+/* LAN1/WAN: vendor eth0.8 / hsgmii_lan_eth, RTL8261N at FE MDIO 5. */
 &gdm4 {
 	status = "okay";
 	managed = "in-band-status";
 	phy-mode = "usxgmii";
 	phy-handle = <&phy5>;
+	airoha,xsi-channel = <13>;
+	airoha,xsi-nboq = <0>;
+	airoha,xsi-src-port = <0x18>;
+};
+
+&eth {
+	/* LAN3: vendor eth0.5 / USB1 XSI, EN8811H at FE MDIO 0xf. */
+	gdm4_usb: ethernet-usb@4 {
+		compatible = "airoha,eth-mac";
+		reg = <4>;
+		phy-mode = "2500base-x";
+		phy-handle = <&phyf>;
+		airoha,xsi-channel = <12>;
+		airoha,xsi-nboq = <1>;
+		airoha,xsi-src-port = <0x19>;
+		status = "okay";
+	};
 };
 
 &snfi {
