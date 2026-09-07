@@ -33,11 +33,6 @@ on:
           - pre-release
           - release
 
-concurrency:
-  # Replace any in-progress build for the same ref/board with the new one.
-  group: build-mtd0-${{ github.workflow }}-${{ github.ref }}-${{ matrix.board }}
-  cancel-in-progress: true
-
 env:
   ARCH: arm
   AIROHA_ATF_REF: 94892b9e42eb1f6992e60bce904c3ef42ea995c8
@@ -101,6 +96,13 @@ jobs:
   build:
     name: Build U-Boot and signed mtd0 (${{ matrix.board }})
     needs: select-boards
+    # Per-matrix-leg concurrency: only cancel a build for the same board on the
+    # same ref. Lives on the job rather than at workflow level because
+    # GitHub Actions does not allow `matrix.*` expressions in the top-level
+    # concurrency block.
+    concurrency:
+      group: build-mtd0-${{ github.workflow }}-${{ github.ref }}-${{ matrix.board }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -164,11 +166,11 @@ jobs:
         id: params
         env:
           BOARD: ${{ matrix.board }}
-          VAR_FIP_ALIGN: ${{ vars[steps.board_ids.outputs.board_upper + '_FIP_ALIGN'] }}
-          VAR_FIP_OFFSET: ${{ vars[steps.board_ids.outputs.board_upper + '_FIP_OFFSET'] }}
-          VAR_MTD0_SIZE: ${{ vars[steps.board_ids.outputs.board_upper + '_MTD0_SIZE'] }}
-          VAR_NTFW_NVCTR: ${{ vars[steps.board_ids.outputs.board_upper + '_NTFW_NVCTR'] }}
-          VAR_TFW_NVCTR: ${{ vars[steps.board_ids.outputs.board_upper + '_TFW_NVCTR'] }}
+          VAR_FIP_ALIGN: ${{ vars[concat(steps.board_ids.outputs.board_upper, '_FIP_ALIGN')] }}
+          VAR_FIP_OFFSET: ${{ vars[concat(steps.board_ids.outputs.board_upper, '_FIP_OFFSET')] }}
+          VAR_MTD0_SIZE: ${{ vars[concat(steps.board_ids.outputs.board_upper, '_MTD0_SIZE')] }}
+          VAR_NTFW_NVCTR: ${{ vars[concat(steps.board_ids.outputs.board_upper, '_NTFW_NVCTR')] }}
+          VAR_TFW_NVCTR: ${{ vars[concat(steps.board_ids.outputs.board_upper, '_TFW_NVCTR')] }}
         run: |
           set -euo pipefail
           board_upper="${{ steps.board_ids.outputs.board_upper }}"
@@ -370,11 +372,11 @@ jobs:
           BOARD: ${{ matrix.board }}
           BOARD_UPPER: ${{ steps.board_ids.outputs.board_upper }}
           FIP_OFFSET_DEC: ${{ steps.params.outputs.fip_offset_dec }}
-          MTD0_PREFIX_B64: ${{ secrets[steps.board_ids.outputs.board_upper + '_MTD0_PREFIX_B64'] }}
-          MTD0_PREFIX_SHA256: ${{ vars[steps.board_ids.outputs.board_upper + '_MTD0_PREFIX_SHA256'] }}
-          MTD0_PREFIX_URL: ${{ secrets[steps.board_ids.outputs.board_upper + '_MTD0_PREFIX_URL'] || vars[steps.board_ids.outputs.board_upper + '_MTD0_PREFIX_URL'] }}
-          TB_PRIVATE_KEY: ${{ secrets[steps.board_ids.outputs.board_upper + '_TB_PRIVATE_KEY'] }}
-          TB_PRIVATE_KEY_B64: ${{ secrets[steps.board_ids.outputs.board_upper + '_TB_PRIVATE_KEY_B64'] }}
+          MTD0_PREFIX_B64: ${{ secrets[concat(steps.board_ids.outputs.board_upper, '_MTD0_PREFIX_B64')] }}
+          MTD0_PREFIX_SHA256: ${{ vars[concat(steps.board_ids.outputs.board_upper, '_MTD0_PREFIX_SHA256')] }}
+          MTD0_PREFIX_URL: ${{ secrets[concat(steps.board_ids.outputs.board_upper, '_MTD0_PREFIX_URL')] || vars[concat(steps.board_ids.outputs.board_upper, '_MTD0_PREFIX_URL')] }}
+          TB_PRIVATE_KEY: ${{ secrets[concat(steps.board_ids.outputs.board_upper, '_TB_PRIVATE_KEY')] }}
+          TB_PRIVATE_KEY_B64: ${{ secrets[concat(steps.board_ids.outputs.board_upper, '_TB_PRIVATE_KEY_B64')] }}
         run: |
           set -euo pipefail
           mkdir -p signing certs out
