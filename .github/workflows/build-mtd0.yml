@@ -403,21 +403,21 @@ jobs:
           BOARD: ${{ matrix.board }}
           BOARD_UPPER: ${{ steps.board_ids.outputs.board_upper }}
           FIP_OFFSET_DEC: ${{ steps.params.outputs.fip_offset_dec }}
+          # The Trusted Boot key is shared across supported boards. The vendor
+          # mtd0 prefix remains per-board because it is BootROM-specific.
+          TB_PRIVATE_KEY: ${{ secrets.TB_PRIVATE_KEY }}
+          TB_PRIVATE_KEY_B64: ${{ secrets.TB_PRIVATE_KEY_B64 }}
           # GitHub Actions expressions cannot concatenate strings to form a
-          # vars/secrets indexer key, so each per-board signing input is
-          # enumerated by board name in env. The shell picks the one
-          # matching $BOARD_UPPER. Add new boards here AND extend the case
-          # statement below.
+          # vars/secrets indexer key, so each per-board mtd0 prefix input is
+          # enumerated by board name in env. The shell picks the one matching
+          # $BOARD_UPPER. Add new boards here AND extend the case statement
+          # below.
           MTD0_PREFIX_B64_XG2010G: ${{ secrets.XG2010G_MTD0_PREFIX_B64 }}
           MTD0_PREFIX_B64_XR1710G: ${{ secrets.XR1710G_MTD0_PREFIX_B64 }}
           MTD0_PREFIX_SHA256_XG2010G: ${{ vars.XG2010G_MTD0_PREFIX_SHA256 }}
           MTD0_PREFIX_SHA256_XR1710G: ${{ vars.XR1710G_MTD0_PREFIX_SHA256 }}
           MTD0_PREFIX_URL_XG2010G: ${{ secrets.XG2010G_MTD0_PREFIX_URL || vars.XG2010G_MTD0_PREFIX_URL }}
           MTD0_PREFIX_URL_XR1710G: ${{ secrets.XR1710G_MTD0_PREFIX_URL || vars.XR1710G_MTD0_PREFIX_URL }}
-          TB_PRIVATE_KEY_XG2010G: ${{ secrets.XG2010G_TB_PRIVATE_KEY }}
-          TB_PRIVATE_KEY_XR1710G: ${{ secrets.XR1710G_TB_PRIVATE_KEY }}
-          TB_PRIVATE_KEY_B64_XG2010G: ${{ secrets.XG2010G_TB_PRIVATE_KEY_B64 }}
-          TB_PRIVATE_KEY_B64_XR1710G: ${{ secrets.XR1710G_TB_PRIVATE_KEY_B64 }}
         run: |
           set -euo pipefail
           BOARD_UPPER="${{ steps.board_ids.outputs.board_upper }}"
@@ -426,15 +426,11 @@ jobs:
               MTD0_PREFIX_B64="${MTD0_PREFIX_B64_XG2010G:-}"
               MTD0_PREFIX_SHA256="${MTD0_PREFIX_SHA256_XG2010G:-}"
               MTD0_PREFIX_URL="${MTD0_PREFIX_URL_XG2010G:-}"
-              TB_PRIVATE_KEY="${TB_PRIVATE_KEY_XG2010G:-}"
-              TB_PRIVATE_KEY_B64="${TB_PRIVATE_KEY_B64_XG2010G:-}"
               ;;
             XR1710G)
               MTD0_PREFIX_B64="${MTD0_PREFIX_B64_XR1710G:-}"
               MTD0_PREFIX_SHA256="${MTD0_PREFIX_SHA256_XR1710G:-}"
               MTD0_PREFIX_URL="${MTD0_PREFIX_URL_XR1710G:-}"
-              TB_PRIVATE_KEY="${TB_PRIVATE_KEY_XR1710G:-}"
-              TB_PRIVATE_KEY_B64="${TB_PRIVATE_KEY_B64_XR1710G:-}"
               ;;
             *)
               echo "Unknown board for signing: ${BOARD_UPPER}" >&2
@@ -496,7 +492,7 @@ jobs:
           Path("signing/tb_key.pem").write_text(key + "\n", encoding="ascii", newline="\n")
           PY
           else
-            missing+=("${BOARD_UPPER}_TB_PRIVATE_KEY or ${BOARD_UPPER}_TB_PRIVATE_KEY_B64")
+            missing+=("TB_PRIVATE_KEY or TB_PRIVATE_KEY_B64")
           fi
 
           if [ -f signing/tb_key.pem ]; then
