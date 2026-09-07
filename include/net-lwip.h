@@ -46,6 +46,7 @@ int net_lwip_eth_start(void);
 void net_lwip_eth_stop(void);
 void net_lwip_set_recovery_dhcp_hook(net_lwip_udp_recv_fn recv, void *arg);
 void net_lwip_set_recovery_poll_hook(net_lwip_poll_fn poll, void *arg);
+void net_lwip_set_recovery_route_hook(bool enable);
 struct netif *net_lwip_new_netif(struct udevice *udev);
 struct netif *net_lwip_new_netif_noip(struct udevice *udev);
 struct netif *net_lwip_new_netif_multi(struct udevice *udev);

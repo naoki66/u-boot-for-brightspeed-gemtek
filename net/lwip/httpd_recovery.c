@@ -430,12 +430,12 @@ static struct recovery_dhcp_server *recovery_rx_srv;
  * Real PHY link state for the recovery ports:
  *   XG2010G:
  *     eth0/gdm4 -> FE MDIO PHY5   (RTL8261N, clause 45)
- *     eth1/gdm1 -> FE MDIO PHY15  (EN8811H, clause 22)
- *     eth2/gdm2 -> switch MDIO PHY12 (LAN4 behind the switch)
- *   XR1710G:
- *     eth0/gdm4 -> switch MDIO PHY5 (clause 45)
  *     eth1/gdm1 -> switch CPU port (fixed link, always up)
- *     eth2/gdm2 -> switch MDIO PHY8 (clause 45)
+ *     eth2/gdm2 -> FE MDIO PHY8   (RTL8261N, clause 45)
+ *   XR1710G:
+ *     eth0/gdm4 -> FE MDIO PHY5   (RTL8261N, clause 45)
+ *     eth1/gdm1 -> switch CPU port (fixed link, always up)
+ *     eth2/gdm2 -> FE MDIO PHY8   (RTL8261N, clause 45)
  * Feeding netif_set_link_up/down() keeps lwIP's ip4_route() on the port
  * that actually has a cable: with all netifs sharing 192.168.1.1/24,
  * only the link-up netif is eligible for TCP reply routing. Ports
@@ -450,8 +450,7 @@ struct recovery_phy_map {
 
 static const struct recovery_phy_map recovery_phy_map_xg2010g[] = {
 	{ 0, false, 5 },
-	{ 1, false, 0xf },
-	{ 2, true, 12 },
+	{ 2, false, 8 },
 };
 
 static const struct recovery_phy_map recovery_phy_map_xr1710g[] = {
@@ -3976,6 +3975,7 @@ int run_http_recovery(void)
 	}
 	if (dhcp_any)
 		net_lwip_set_recovery_dhcp_hook(recovery_dhcp_recv, NULL);
+	net_lwip_set_recovery_route_hook(true);
 
 	if (!recovery_httpd_started) {
 		httpd_init();
@@ -4037,6 +4037,7 @@ int run_http_recovery(void)
 
 	net_lwip_set_recovery_poll_hook(NULL, NULL);
 	recovery_cancel_timeouts();
+	net_lwip_set_recovery_route_hook(false);
 	net_lwip_set_recovery_dhcp_hook(NULL, NULL);
 	recovery_net_teardown();
 	recovery_lwip_cleanup(NULL);

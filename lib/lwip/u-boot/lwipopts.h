@@ -62,6 +62,21 @@
 #define LWIP_IPV4			1
 #define LWIP_IPV6			0
 
+#if defined(CONFIG_HTTPD_RECOVERY)
+struct ip4_addr;
+struct netif;
+
+struct netif *net_lwip_recovery_route_src(const struct ip4_addr *src,
+					  const struct ip4_addr *dest);
+int net_lwip_recovery_tcp_inpkt(void *pcb, void *hdr, unsigned int optlen,
+				unsigned int opt1len, void *opt2, void *p);
+
+#define LWIP_HOOK_IP4_ROUTE_SRC(src, dest) \
+	net_lwip_recovery_route_src(src, dest)
+#define LWIP_HOOK_TCP_INPACKET_PCB(pcb, hdr, optlen, opt1len, opt2, p) \
+	net_lwip_recovery_tcp_inpkt(pcb, hdr, optlen, opt1len, opt2, p)
+#endif
+
 #define MEM_ALIGNMENT                   8
 
 #if defined(CONFIG_HTTPD_RECOVERY)

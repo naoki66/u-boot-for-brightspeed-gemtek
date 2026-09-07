@@ -9,11 +9,13 @@
 #include <hexdump.h>
 #include <linux/compiler_attributes.h>
 #include <linux/kernel.h>
+#include <lwip/ip.h>
 #include <lwip/ip4_addr.h>
 #include <lwip/dns.h>
 #include <lwip/err.h>
 #include <lwip/netif.h>
 #include <lwip/pbuf.h>
+#include <lwip/tcp.h>
 #include <lwip/etharp.h>
 #include <lwip/init.h>
 #include <lwip/prot/ip.h>
@@ -46,6 +48,7 @@ static net_lwip_udp_recv_fn recovery_dhcp_hook;
 static void *recovery_dhcp_hook_arg;
 static net_lwip_poll_fn recovery_poll_hook;
 static void *recovery_poll_hook_arg;
+static bool recovery_route_hook;
 
 void net_lwip_set_recovery_dhcp_hook(net_lwip_udp_recv_fn recv, void *arg)
 {
@@ -59,6 +62,56 @@ void net_lwip_set_recovery_poll_hook(net_lwip_poll_fn poll, void *arg)
 	recovery_poll_hook_arg = arg;
 }
 
+void net_lwip_set_recovery_route_hook(bool enable)
+{
+	recovery_route_hook = enable;
+}
+
+struct netif *net_lwip_recovery_route_src(const ip4_addr_t *src,
+					  const ip4_addr_t *dest)
+{
+	struct netif *netif;
+
+	if (!recovery_route_hook || !src || !dest)
+		return NULL;
+
+	netif = ip_current_input_netif();
+	if (!netif || !netif_is_up(netif) ||
+	    ip4_addr_isany_val(*netif_ip4_addr(netif)))
+		return NULL;
+
+	if (!ip4_addr_eq(src, netif_ip4_addr(netif)) ||
+	    !ip4_addr_net_eq(dest, netif_ip4_addr(netif),
+			     netif_ip4_netmask(netif)))
+		return NULL;
+
+	return netif;
+}
+
+int net_lwip_recovery_tcp_inpkt(void *arg, void *hdr, unsigned int optlen,
+				unsigned int opt1len, void *opt2, void *p)
+{
+	struct tcp_pcb *pcb = arg;
+	struct netif *netif;
+
+	LWIP_UNUSED_ARG(hdr);
+	LWIP_UNUSED_ARG(optlen);
+	LWIP_UNUSED_ARG(opt1len);
+	LWIP_UNUSED_ARG(opt2);
+	LWIP_UNUSED_ARG(p);
+
+	if (!recovery_route_hook || !pcb || pcb->state == LISTEN ||
+	    pcb->netif_idx != NETIF_NO_INDEX)
+		return ERR_OK;
+
+	netif = ip_current_input_netif();
+	if (!netif || !netif_is_up(netif))
+		return ERR_OK;
+
+	pcb->netif_idx = netif_get_index(netif);
+	return ERR_OK;
+}
+
 static void net_lwip_run_recovery_poll_hook(void)
 {
 	if (recovery_poll_hook)
@@ -70,6 +123,10 @@ void net_lwip_set_recovery_dhcp_hook(net_lwip_udp_recv_fn recv, void *arg)
 }
 
 void net_lwip_set_recovery_poll_hook(net_lwip_poll_fn poll, void *arg)
+{
+}
+
+void net_lwip_set_recovery_route_hook(bool enable)
 {
 }
 
