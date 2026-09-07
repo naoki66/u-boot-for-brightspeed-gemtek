@@ -529,8 +529,22 @@ jobs:
           fi
 
           if [ "${#missing[@]}" -gt 0 ]; then
-            printf 'Missing signing input: %s\n' "${missing[@]}"
-            exit 1
+            echo "Missing signing inputs:" >&2
+            printf '  - %s\n' "${missing[@]}" >&2
+            if [ "${GITHUB_EVENT_NAME:-push}" = "workflow_dispatch" ]; then
+              # Manual release runs MUST be signed.  Refuse to publish an
+              # unsigned mtd0 image; force the operator to configure the
+              # missing vars/secrets and re-run.
+              echo "::error::Refusing to publish a release without signing inputs. Set the missing vars/secrets in repo settings and re-run, or supply an mtd0-prefix URL/B64." >&2
+              exit 1
+            fi
+            # Push-triggered runs are for toolchain validation.  Skip the
+            # signing-dependent steps instead of failing the run, so a
+            # missing secret does not block every code change.
+            echo "::warning::Signing skipped on push because the above vars/secrets/bundled assets are missing in this repository." >&2
+            echo "::warning::Build artifacts (u-boot.bin, bl2.bin, bl31.bin) are still produced for toolchain validation but no signed FIP/mtd0 is uploaded." >&2
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           for image in signing/bl2.bin signing/bl31.bin signing/mtd0-prefix.bin; do
@@ -656,6 +670,7 @@ jobs:
 
       - name: Prepare artifacts
         id: artifact
+        if: ${{ steps.signing.outputs.ready == 'true' }}
         env:
           AIROHA_ATF_BUILD_REF: ${{ env.AIROHA_ATF_REF }}
           ATF_BUILD_BASE_REF: ${{ env.ATF_BASE_REF }}
@@ -761,6 +776,7 @@ jobs:
           ls -la build-output
 
       - name: Upload artifacts
+        if: ${{ steps.signing.outputs.ready == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.artifact.outputs.artifact_name }}
