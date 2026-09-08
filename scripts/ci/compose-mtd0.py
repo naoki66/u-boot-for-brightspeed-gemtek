@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0+
 #
-# Compose the 2 MiB /dev/mtd0 image from the preserved vendor prefix and the
-# freshly signed FIP. The FIP is placed at the configured offset inside mtd0
-# (default 0x800) and the rest of the image is padded with 0xFF, matching the
-# behaviour of Airoha/Brightspeed stock images after a blank-block erase.
+# Compose the 2 MiB /dev/mtd0 image from either the preserved vendor prefix or
+# a zero-filled prefix and the freshly signed FIP. The FIP is placed at the
+# configured offset inside mtd0 (default 0x800) and the rest of the image is
+# padded with 0xFF, matching the behaviour of Airoha/Brightspeed stock images
+# after a blank-block erase.
 #
 # This used to live inline inside .github/workflows/build-mtd0.yml; extracting
 # it lets the same check run locally and from CI.
@@ -22,7 +23,13 @@ def main() -> int:
         "--prefix",
         default="signing/mtd0-prefix.bin",
         type=Path,
-        help="path to the vendor mtd0 prefix (size must equal --fip-offset)",
+        help="path to the vendor mtd0 prefix (stock mode only; size must equal --fip-offset)",
+    )
+    parser.add_argument(
+        "--prefix-mode",
+        default=os.environ.get("MTD0_PREFIX_MODE", "stock"),
+        choices=("stock", "zero"),
+        help="prefix source before the FIP: stock file or zero-filled bytes",
     )
     parser.add_argument(
         "--fip",
@@ -51,7 +58,10 @@ def main() -> int:
     mtd0_size = int(args.mtd0_size, 0)
     fip_offset = int(args.fip_offset, 0)
 
-    prefix = args.prefix.read_bytes() if fip_offset else b""
+    if args.prefix_mode == "zero":
+        prefix = b"\0" * fip_offset
+    else:
+        prefix = args.prefix.read_bytes() if fip_offset else b""
     fip = args.fip.read_bytes()
 
     if len(prefix) != fip_offset:
@@ -73,6 +83,7 @@ def main() -> int:
 
     sha = hashlib.sha256(payload).hexdigest()
     print(f"mtd0 bytes: {len(payload)}")
+    print(f"prefix mode: {args.prefix_mode}")
     print(f"fip offset: 0x{fip_offset:x}")
     print(f"fip bytes: {len(fip)}")
     print(f"fip end: 0x{fip_offset + len(fip):x}")

@@ -202,8 +202,22 @@ unsigned long airoha_recovery_get_lan_activity_ms(void)
 #define RECOVERY_GPIO44_FLASH_MODE_CFG BIT(24)
 #define RECOVERY_FACTORY_SIZE  (1 * 1024 * 1024UL)
 #define RECOVERY_UBI_WRITE_CHUNK (1024 * 1024U)
+#define RECOVERY_MTD0_PREFIX_ARM_NOP 0xe320f000U
+#define RECOVERY_MTD0_PREFIX_ZERO 0x00000000U
 #define RECOVERY_MTD0_FIP_OFFSET 0x800U
 #define RECOVERY_FIP_TOC_HEADER_NAME 0xaa640001U
+#define RECOVERY_FIP_TOC_HEADER_SIZE 0x10U
+#define RECOVERY_FIP_TOC_ENTRY_SIZE 0x28U
+#define RECOVERY_FIP_TOC_UUID_SIZE 0x10U
+#define RECOVERY_FIP_TOC_ENTRY_PAYLOAD_OFFSET 0x10U
+#define RECOVERY_FIP_TOC_ENTRY_PAYLOAD_SIZE_OFFSET 0x18U
+#define RECOVERY_FIP_TOC_FLAGS_OFFSET 0x8U
+#define RECOVERY_FIP_TOC_FLAG_BYPASS_FWUPGRADE 0x1U
+
+static const u8 recovery_fip_uuid_nt_fw[RECOVERY_FIP_TOC_UUID_SIZE] = {
+	0xd6, 0xd0, 0xee, 0xa7, 0xfc, 0xea, 0xd5, 0x4b,
+	0x97, 0x82, 0x99, 0x34, 0xf2, 0x34, 0xb6, 0xe4,
+};
 
 static u8 *recv_base;
 static u32 recv_off;
@@ -277,6 +291,94 @@ static u32 recovery_le32_to_cpu(const void *p)
 
 	return ((u32)b[3] << 24) | ((u32)b[2] << 16) |
 	       ((u32)b[1] << 8) | b[0];
+}
+
+static u64 recovery_le64_to_cpu(const void *p)
+{
+	const u8 *b = p;
+
+	return ((u64)b[7] << 56) | ((u64)b[6] << 48) |
+	       ((u64)b[5] << 40) | ((u64)b[4] << 32) |
+	       ((u64)b[3] << 24) | ((u64)b[2] << 16) |
+	       ((u64)b[1] << 8) | b[0];
+}
+
+static bool recovery_region_is_zero(const u8 *p, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		if (p[i])
+			return false;
+	}
+
+	return true;
+}
+
+static int recovery_validate_mtd0_prefix(const u8 *p)
+{
+	u32 prefix_word = recovery_le32_to_cpu(p);
+
+	if (prefix_word == RECOVERY_MTD0_PREFIX_ARM_NOP)
+		return 0;
+
+	if (prefix_word == RECOVERY_MTD0_PREFIX_ZERO) {
+		if (recovery_region_is_zero(p, RECOVERY_MTD0_FIP_OFFSET))
+			return 0;
+
+		printf("Invalid mtd0 bootloader image: prefix[0x0000..0x%04x] is not all zero\n",
+		       RECOVERY_MTD0_FIP_OFFSET - 1);
+		return -EINVAL;
+	}
+
+	printf("Invalid mtd0 bootloader image: prefix[0x0000]=0x%08x\n",
+	       prefix_word);
+	printf("Expected full signed xg2010g-*-mtd0-signed.bin with stock or zero mtd0 prefix\n");
+	return -EINVAL;
+}
+
+static int recovery_validate_fip_payload(const u8 *fip, size_t fip_size,
+					 const u8 *uuid, const char *name)
+{
+	size_t toc_offset = RECOVERY_FIP_TOC_HEADER_SIZE;
+	u64 payload_offset;
+	u64 payload_size;
+	u64 fip_size64 = fip_size;
+	const u8 *entry;
+
+	while (toc_offset + RECOVERY_FIP_TOC_ENTRY_SIZE <= fip_size) {
+		entry = fip + toc_offset;
+		if (recovery_region_is_zero(entry, RECOVERY_FIP_TOC_UUID_SIZE))
+			break;
+
+		if (!memcmp(entry, uuid, RECOVERY_FIP_TOC_UUID_SIZE)) {
+			payload_offset = recovery_le64_to_cpu(
+				entry + RECOVERY_FIP_TOC_ENTRY_PAYLOAD_OFFSET);
+			payload_size = recovery_le64_to_cpu(
+				entry + RECOVERY_FIP_TOC_ENTRY_PAYLOAD_SIZE_OFFSET);
+
+			if (!payload_size) {
+				printf("Invalid mtd0 bootloader image: FIP %s payload is empty\n",
+				       name);
+				return -EINVAL;
+			}
+			if (payload_offset > fip_size64 ||
+			    payload_size > fip_size64 - payload_offset) {
+				printf("Invalid mtd0 bootloader image: FIP %s payload 0x%llx..0x%llx exceeds mtd0 image\n",
+				       name, (unsigned long long)payload_offset,
+				       (unsigned long long)(payload_offset +
+							    payload_size));
+				return -EINVAL;
+			}
+
+			return 0;
+		}
+
+		toc_offset += RECOVERY_FIP_TOC_ENTRY_SIZE;
+	}
+
+	printf("Invalid mtd0 bootloader image: missing FIP %s payload\n", name);
+	return -EINVAL;
 }
 
 enum upload_target {
@@ -2109,12 +2211,19 @@ static int recovery_validate_mtd0_bootloader_image(const void *image,
 {
 	const u8 *p = image;
 	u32 fip_magic;
+	u32 plat_toc_flags;
+	u64 fip_flags;
+	int ret;
 
 	if (size != RECOVERY_MAX_UBOOT_SIZE) {
 		printf("mtd0 bootloader image must be exactly 2 MiB: %lu bytes\n",
 		       (unsigned long)size);
 		return -EINVAL;
 	}
+
+	ret = recovery_validate_mtd0_prefix(p);
+	if (ret)
+		return ret;
 
 	fip_magic = recovery_le32_to_cpu(p + RECOVERY_MTD0_FIP_OFFSET);
 	if (fip_magic != RECOVERY_FIP_TOC_HEADER_NAME) {
@@ -2123,6 +2232,23 @@ static int recovery_validate_mtd0_bootloader_image(const void *image,
 		printf("Expected full signed xg2010g-*-mtd0-signed.bin, not u-boot.bin or bare FIP\n");
 		return -EINVAL;
 	}
+
+	fip_flags = recovery_le64_to_cpu(p + RECOVERY_MTD0_FIP_OFFSET +
+					 RECOVERY_FIP_TOC_FLAGS_OFFSET);
+	plat_toc_flags = (fip_flags >> 32) & 0xffff;
+	if (!(plat_toc_flags & RECOVERY_FIP_TOC_FLAG_BYPASS_FWUPGRADE)) {
+		printf("Invalid mtd0 bootloader image: missing BYPASS_FWUPGRADE platform ToC flag\n");
+		printf("FIP platform ToC flags=0x%04x, expected bit 0 set\n",
+		       plat_toc_flags);
+		return -EINVAL;
+	}
+
+	ret = recovery_validate_fip_payload(p + RECOVERY_MTD0_FIP_OFFSET,
+					    size - RECOVERY_MTD0_FIP_OFFSET,
+					    recovery_fip_uuid_nt_fw,
+					    "BL33/nt-fw");
+	if (ret)
+		return ret;
 
 	return 0;
 }

@@ -57,6 +57,7 @@ env:
   LZMA_SOURCE_URL: https://sources.openwrt.org/lzma-4.65.tar.bz2
   MBEDTLS_REF: 72718dd87e087215ce9155a826ee5a66cfbe9631
   MTD0_FIP_PLAT_TOC_FLAGS: "1"
+  MTD0_PREFIX_MODE: "zero"
 
 permissions:
   contents: read
@@ -409,8 +410,9 @@ jobs:
           BOARD: ${{ matrix.board }}
           BOARD_UPPER: ${{ steps.board_ids.outputs.board_upper }}
           FIP_OFFSET_DEC: ${{ steps.params.outputs.fip_offset_dec }}
+          MTD0_PREFIX_MODE: ${{ env.MTD0_PREFIX_MODE }}
           # The signing key is shared across supported boards. The vendor
-          # mtd0 prefix remains per-board because it is BootROM-specific.
+          # mtd0 prefix is only restored when MTD0_PREFIX_MODE=stock.
           TB_PRIVATE_KEY: ${{ secrets.TB_PRIVATE_KEY }}
           TB_PRIVATE_KEY_B64: ${{ secrets.TB_PRIVATE_KEY_B64 }}
           # GitHub Actions expressions cannot concatenate strings to form a
@@ -446,9 +448,17 @@ jobs:
           mkdir -p signing certs out
           missing=()
 
-          # The vendor mtd0 prefix is per-board BootROM-specific; never share
-          # XG2010G's prefix with XR1710G. Refuse to fall back to any other
-          # board's bundled asset and fail loudly if nothing is configured.
+          case "$MTD0_PREFIX_MODE" in
+            stock|zero)
+              ;;
+            *)
+              echo "Invalid MTD0_PREFIX_MODE=${MTD0_PREFIX_MODE}" >&2
+              exit 1
+              ;;
+          esac
+
+          # In stock-prefix mode the vendor mtd0 prefix is per-board; never
+          # share XG2010G's prefix with XR1710G.
           BUNDLED_ASSET_DIR="board/airoha/${BOARD}/firmware"
 
           restore_binary() {
@@ -508,39 +518,47 @@ jobs:
 
           cp out/atf/bl2.bin signing/bl2.bin
           cp out/atf/bl31.bin signing/bl31.bin
-          if [ -n "$MTD0_PREFIX_B64$MTD0_PREFIX_URL" ]; then
-            restore_binary "mtd0 prefix" "$MTD0_PREFIX_B64" "$MTD0_PREFIX_URL" signing/mtd0-prefix.bin "$MTD0_PREFIX_SHA256" \
-              || missing+=("${BOARD_UPPER}_MTD0_PREFIX_B64 or ${BOARD_UPPER}_MTD0_PREFIX_URL")
-          elif [ -f "${BUNDLED_ASSET_DIR}/mtd0-prefix.bin" ]; then
-            cp "${BUNDLED_ASSET_DIR}/mtd0-prefix.bin" signing/mtd0-prefix.bin
-            # Bundled prefixes ship with a ${BOARD_UPPER}_MTD0_PREFIX_SHA256
-            # variable too; if it is missing we trust the bundled file and
-            # only warn.
-            if [ -n "$MTD0_PREFIX_SHA256" ]; then
-              printf '%s  %s\n' "$MTD0_PREFIX_SHA256" signing/mtd0-prefix.bin | sha256sum -c -
-            else
-              echo "warning: ${BOARD_UPPER}_MTD0_PREFIX_SHA256 not set; trusting bundled mtd0-prefix.bin" >&2
-            fi
+          if [ "$MTD0_PREFIX_MODE" = "zero" ]; then
+            echo "Using zero-filled mtd0 prefix before FIP offset ${FIP_OFFSET_DEC}"
           else
-            missing+=("${BOARD_UPPER}_MTD0_PREFIX_B64 / ${BOARD_UPPER}_MTD0_PREFIX_URL / ${BUNDLED_ASSET_DIR}/mtd0-prefix.bin")
-          fi
+            if [ -n "$MTD0_PREFIX_B64$MTD0_PREFIX_URL" ]; then
+              restore_binary "mtd0 prefix" "$MTD0_PREFIX_B64" "$MTD0_PREFIX_URL" signing/mtd0-prefix.bin "$MTD0_PREFIX_SHA256" \
+                || missing+=("${BOARD_UPPER}_MTD0_PREFIX_B64 or ${BOARD_UPPER}_MTD0_PREFIX_URL")
+            elif [ -f "${BUNDLED_ASSET_DIR}/mtd0-prefix.bin" ]; then
+              cp "${BUNDLED_ASSET_DIR}/mtd0-prefix.bin" signing/mtd0-prefix.bin
+              # Bundled prefixes ship with a ${BOARD_UPPER}_MTD0_PREFIX_SHA256
+              # variable too; if it is missing we trust the bundled file and
+              # only warn.
+              if [ -n "$MTD0_PREFIX_SHA256" ]; then
+                printf '%s  %s\n' "$MTD0_PREFIX_SHA256" signing/mtd0-prefix.bin | sha256sum -c -
+              else
+                echo "warning: ${BOARD_UPPER}_MTD0_PREFIX_SHA256 not set; trusting bundled mtd0-prefix.bin" >&2
+              fi
+            else
+              missing+=("${BOARD_UPPER}_MTD0_PREFIX_B64 / ${BOARD_UPPER}_MTD0_PREFIX_URL / ${BUNDLED_ASSET_DIR}/mtd0-prefix.bin")
+            fi
 
-          if [ -f signing/mtd0-prefix.bin ]; then
-            prefix_size=$(stat -c%s signing/mtd0-prefix.bin)
-            if (( prefix_size != FIP_OFFSET_DEC )); then
-              echo "mtd0 prefix must be exactly ${FIP_OFFSET_DEC} bytes, got ${prefix_size}" >&2
-              exit 1
+            if [ -f signing/mtd0-prefix.bin ]; then
+              prefix_size=$(stat -c%s signing/mtd0-prefix.bin)
+              if (( prefix_size != FIP_OFFSET_DEC )); then
+                echo "mtd0 prefix must be exactly ${FIP_OFFSET_DEC} bytes, got ${prefix_size}" >&2
+                exit 1
+              fi
             fi
           fi
 
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "Missing signing inputs:" >&2
             printf '  - %s\n' "${missing[@]}" >&2
-            echo "::error::Signing inputs are required for all build modes, including test. Set the missing vars/secrets in repo settings and re-run, or supply an mtd0-prefix URL/B64." >&2
+            echo "::error::Signing inputs are required for all build modes, including test. Set the missing vars/secrets in repo settings and re-run. For MTD0_PREFIX_MODE=stock, also supply an mtd0-prefix URL/B64." >&2
             exit 1
           fi
 
-          for image in signing/bl2.bin signing/bl31.bin signing/mtd0-prefix.bin; do
+          images=(signing/bl2.bin signing/bl31.bin)
+          if [ "$MTD0_PREFIX_MODE" = "stock" ]; then
+            images+=(signing/mtd0-prefix.bin)
+          fi
+          for image in "${images[@]}"; do
             test -s "$image"
             ls -la "$image"
           done
@@ -681,10 +699,12 @@ jobs:
           BOARD: ${{ matrix.board }}
           FIP_OFFSET: ${{ steps.params.outputs.fip_offset }}
           MTD0_SIZE: ${{ steps.params.outputs.mtd0_size }}
+          MTD0_PREFIX_MODE: ${{ env.MTD0_PREFIX_MODE }}
         run: |
           set -euo pipefail
           python3 scripts/ci/compose-mtd0.py \
             --prefix signing/mtd0-prefix.bin \
+            --prefix-mode "$MTD0_PREFIX_MODE" \
             --fip "out/fip-${BOARD}-signed.bin" \
             --output "out/mtd0-bootloader-${BOARD}-signed.bin"
           test "$(stat -c%s "out/mtd0-bootloader-${BOARD}-signed.bin")" = "${{ steps.params.outputs.mtd0_size_dec }}"
