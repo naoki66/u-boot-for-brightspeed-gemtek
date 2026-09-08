@@ -391,6 +391,10 @@ jobs:
           board/airoha/xg2010g/atf/build-atf.sh
           test -s out/atf/bl2.bin
           test -s out/atf/bl31.bin
+          python3 scripts/ci/validate_lzma_alone.py \
+            --label BL31 \
+            --raw trusted-firmware-a-build/build/en7523/release/bl31.bin \
+            --payload out/atf/bl31.bin
 
           # BL2 先把 BL33 载荷读入固定解压缓冲区，再展开到最终执行地址。
           "$LZMA" e u-boot.bin out/atf/bl33.bin
@@ -596,10 +600,12 @@ jobs:
 
           "$FIPTOOL" info out/fip-${BOARD}-signed.bin | tee out/fip-info.txt
           "$FIPTOOL" unpack --force \
+            --soc-fw out/fip-bl31-check.bin \
             --nt-fw out/fip-bl33-check.bin \
             out/fip-${BOARD}-signed.bin
+          cmp out/fip-bl31-check.bin signing/bl31.bin
           cmp out/fip-bl33-check.bin out/atf/bl33.bin
-          rm -f out/fip-bl33-check.bin
+          rm -f out/fip-bl31-check.bin out/fip-bl33-check.bin
           check_fip_size out/fip-${BOARD}-signed.bin "$((BL23_FIP_MAX_SIZE))"
 
           # X 模式第一阶段需要同时携带 BL2 与 tb-fw 证书。
@@ -627,10 +633,12 @@ jobs:
 
           "$FIPTOOL" info out/ubi-bl31-uboot.fip | tee out/ubi-bl31-uboot-fip-info.txt
           "$FIPTOOL" unpack --force \
+            --soc-fw out/recovery-bl31-check.bin \
             --nt-fw out/recovery-bl33-check.bin \
             out/ubi-bl31-uboot.fip
+          cmp out/recovery-bl31-check.bin signing/bl31.bin
           cmp out/recovery-bl33-check.bin out/atf/bl33.bin
-          rm -f out/recovery-bl33-check.bin
+          rm -f out/recovery-bl31-check.bin out/recovery-bl33-check.bin
           check_fip_size out/ubi-bl31-uboot.fip "$((BL23_FIP_MAX_SIZE))"
 
           # 应急 bootext 垫片：给 BL2 加 BootROM XMODEM 加载头，格式对照原厂
@@ -740,7 +748,7 @@ jobs:
             echo "Recovery BL2/preloader signed FIP: ${preloader_name}"
             echo "Recovery BL31+U-Boot FIP: ${recovery_fip_name}"
             echo "BootROM XMODEM first-stage BL2 (bootext fallback): ${bootext_name}"
-            echo "Raw BL31: ${bl31_name}"
+            echo "Compressed BL31: ${bl31_name}"
             echo "Certificate chain: BL2 tb-fw, BL31 soc-fw, U-Boot BL33 nt-fw"
             echo "Certificate files: generated during signing, not uploaded"
           } > "build-output/${board}-${RELEASE_DATE}-${COMMIT_SHORT}-build-info.txt"

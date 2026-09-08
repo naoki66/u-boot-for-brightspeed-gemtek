@@ -569,6 +569,12 @@ X 模式加载临时引导。该流程需要 TTL 串口和支持 XMODEM 的终�
 8. 系统固件上传会自动擦除并重建完整 UBI，等待数分钟完成刷写。
 9. 刷写完成后务必断电重启设备。
 
+若第二段出现 ``ERROR:   LZMA: res 2 state 0`` / ``Failed to decompress image``，
+表示 BL23 已经进入第二阶段，但收到的 BL31 + U-Boot FIP 中的压缩镜像无效。先确认
+第二次 XMODEM 发送的是同板型 ``...-ubi-bl31-uboot.fip``，而不是
+``...-mtd0-signed.bin``、``...-fip-signed.bin`` 或 ``...-ubi-preloader.bin``；
+再用 artifact 里的 ``sha256sums.txt`` 核对文件后重发。
+
 U-Boot 启动后会对 RESET GPIO 做确认：默认需要持续按住 3 秒才进入 Web
 Recovery，并在串口打印倒计时。中途松开会取消恢复并继续正常启动。可通过环境变量
 调整等待时间：

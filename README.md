@@ -157,6 +157,13 @@ X 模式加载临时引导。
     `<board>-...-ubi-bl31-uboot.fip`。
 13. 等待数分钟完成刷写，之后务必断电重启设备。
 
+> [!TIP]
+> 如果第二段提示 `ERROR:   LZMA: res 2 state 0` / `Failed to decompress image`，
+> 说明 BL23 已经运行，但收到的 BL31 + U-Boot FIP 里的压缩镜像无效。请重新确认第二次
+> XMODEM 发送的是同板型的 `<board>-...-ubi-bl31-uboot.fip`，不是
+> `mtd0-signed.bin`、`fip-signed.bin` 或 `ubi-preloader.bin`；同时对照
+> `sha256sums.txt` 校验文件后再发一次。
+
 > [!CAUTION]
 > 必须使用**无痕（隐私）窗口**打开 `http://192.168.1.1/`。设备此前运行 OpenWrt 时，
 > 同一地址曾由 LuCI 提供 301 跳转到登录页 `http://192.168.1.1/cgi-bin/luci/`，普通
