@@ -272,6 +272,8 @@ int net_lwip_recovery_tcp_inpkt(void *pcb, void *hdr, unsigned int optlen,
 #define LWIP_HTTPD_SUPPORT_REQUESTLIST          1
 #define LWIP_HTTPD_REQ_BUFSIZE                  16384
 #define LWIP_HTTPD_REQ_QUEUELEN                 64
+#define LWIP_HTTPD_DYNAMIC_FILE_READ            1
+#define LWIP_HTTPD_FILE_EXTENSION               1
 /* Custom recovery responses may be freed as soon as httpd closes the file. */
 #define HTTP_IS_DATA_VOLATILE(hs) \
 	(((hs)->handle->flags & FS_FILE_FLAGS_CUSTOM) ? TCP_WRITE_FLAG_COPY : 0)

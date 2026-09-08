@@ -14,6 +14,7 @@
 #include <command.h>
 #include <mtd.h>
 #include <net-lwip.h>
+#include <time.h>
 #include <net.h>
 #include <initcall.h>
 #include <ubi_uboot.h>
@@ -3109,20 +3110,29 @@ static int recovery_open_custom_response(struct fs_file *file,
 	file->len = total_len;
 	file->index = file->len;
 	file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+#if LWIP_HTTPD_FILE_EXTENSION
+	file->pextension = NULL;
+#endif
 	return 1;
 }
+
+struct recovery_backup_stream {
+	struct mtd_info *mtd;
+	const char *part;
+	size_t header_len;
+	size_t header_pos;
+	loff_t body_pos;
+	char header[256];
+};
 
 static int recovery_open_mtd_backup(struct fs_file *file, const char *part,
 				    const char *filename)
 {
+	struct recovery_backup_stream *stream;
 	struct mtd_info *mtd;
-	size_t retlen = 0;
 	size_t body_len = RECOVERY_RAW_PART_SIZE;
 	size_t total_len;
-	char header[256];
-	char *page;
 	int header_len;
-	int ret;
 
 	mtd_probe_devices();
 	mtd = get_mtd_device_nm(part);
@@ -3140,7 +3150,14 @@ static int recovery_open_mtd_backup(struct fs_file *file, const char *part,
 		return 0;
 	}
 
-	header_len = snprintf(header, sizeof(header),
+	stream = calloc(1, sizeof(*stream));
+	if (!stream) {
+		printf("HTTP recovery: no memory for '%s' backup stream\n", part);
+		put_mtd_device(mtd);
+		return 0;
+	}
+
+	header_len = snprintf(stream->header, sizeof(stream->header),
 			      "HTTP/1.0 200 OK\r\n"
 			      "Content-Type: application/octet-stream\r\n"
 			      "Content-Disposition: attachment; filename=\"%s\"\r\n"
@@ -3149,44 +3166,107 @@ static int recovery_open_mtd_backup(struct fs_file *file, const char *part,
 			      "Connection: close\r\n"
 			      "\r\n",
 			      filename, RECOVERY_RAW_PART_SIZE);
-	if (header_len < 0 || header_len >= (int)sizeof(header)) {
+	if (header_len < 0 || header_len >= (int)sizeof(stream->header)) {
+		free(stream);
 		put_mtd_device(mtd);
 		return 0;
 	}
 
 	total_len = header_len + body_len;
 	if (total_len > INT_MAX) {
+		free(stream);
 		put_mtd_device(mtd);
 		return 0;
 	}
 
-	page = malloc(total_len + 1);
-	if (!page) {
-		printf("HTTP recovery: no memory for %lu-byte '%s' backup\n",
-		       RECOVERY_RAW_PART_SIZE, part);
-		put_mtd_device(mtd);
-		return 0;
-	}
+	stream->mtd = mtd;
+	stream->part = part;
+	stream->header_len = header_len;
+	stream->header_pos = 0;
+	stream->body_pos = 0;
 
-	memcpy(page, header, header_len);
-	ret = mtd_read(mtd, 0, body_len, &retlen, page + header_len);
-	put_mtd_device(mtd);
-	if ((ret && ret != -EUCLEAN) || retlen != body_len) {
-		printf("HTTP recovery: failed to read '%s' backup: ret=%d retlen=%lu\n",
-		       part, ret, (unsigned long)retlen);
-		free(page);
-		return 0;
-	}
-
-	page[total_len] = '\0';
-	file->data = page;
+	file->data = NULL;
 	file->len = (int)total_len;
-	file->index = file->len;
+	file->index = 0;
 	file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+#if LWIP_HTTPD_FILE_EXTENSION
+	file->pextension = stream;
+#endif
 
-	printf("HTTP recovery: serving %lu-byte backup of '%s'\n",
+	printf("HTTP recovery: serving %lu-byte streamed backup of '%s'\n",
 	       RECOVERY_RAW_PART_SIZE, part);
 	return 1;
+}
+
+static int recovery_read_mtd_backup(struct fs_file *file, char *buffer,
+				    int count)
+{
+#if LWIP_HTTPD_FILE_EXTENSION
+	struct recovery_backup_stream *stream = file->pextension;
+	int copied = 0;
+
+	if (!stream)
+		return FS_READ_EOF;
+
+	while (copied < count && file->index < file->len) {
+		if (stream->header_pos < stream->header_len) {
+			int chunk = min(count - copied,
+					(int)(stream->header_len -
+					      stream->header_pos));
+
+			memcpy(buffer + copied,
+			       stream->header + stream->header_pos, chunk);
+			stream->header_pos += chunk;
+			file->index += chunk;
+			copied += chunk;
+			continue;
+		}
+
+		if (stream->body_pos < RECOVERY_RAW_PART_SIZE) {
+			int chunk = min(count - copied,
+					(int)(RECOVERY_RAW_PART_SIZE -
+					      stream->body_pos));
+			size_t retlen = 0;
+			int ret;
+
+			ret = mtd_read(stream->mtd, stream->body_pos, chunk,
+				       &retlen, buffer + copied);
+			if ((ret && ret != -EUCLEAN) || retlen != chunk) {
+				printf("HTTP recovery: failed to read '%s' backup at 0x%llx: ret=%d retlen=%lu\n",
+				       stream->part,
+				       (unsigned long long)stream->body_pos,
+				       ret, (unsigned long)retlen);
+				file->index = file->len;
+				break;
+			}
+
+			stream->body_pos += chunk;
+			file->index += chunk;
+			copied += chunk;
+			continue;
+		}
+
+		break;
+	}
+
+	return copied ? copied : FS_READ_EOF;
+#else
+	return FS_READ_EOF;
+#endif
+}
+
+static void recovery_close_mtd_backup(struct fs_file *file)
+{
+#if LWIP_HTTPD_FILE_EXTENSION
+	struct recovery_backup_stream *stream = file->pextension;
+
+	if (!stream)
+		return;
+
+	put_mtd_device(stream->mtd);
+	free(stream);
+	file->pextension = NULL;
+#endif
 }
 
 /* lwIP httpd custom file hooks: serve only dynamic endpoints; static files via fsdata */
@@ -3226,6 +3306,9 @@ int fs_open_custom(struct fs_file *file, const char *name)
 	        file->len = sizeof(recovery_page_ok) - 1;
 	        file->index = file->len;
 	        file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+#if LWIP_HTTPD_FILE_EXTENSION
+		file->pextension = NULL;
+#endif
 	        return 1;
 	    }
 	    else if (!strcmp(p, "about")) {
@@ -3270,7 +3353,12 @@ int fs_open_custom(struct fs_file *file, const char *name)
 
 void fs_close_custom(struct fs_file *file)
 {
-	if (file && file->data && file->data != recovery_page_ok) {
+	if (!file)
+		return;
+
+	recovery_close_mtd_backup(file);
+
+	if (file->data && file->data != recovery_page_ok) {
 		free((void *)file->data);
 		file->data = NULL;
 	}
@@ -3278,20 +3366,30 @@ void fs_close_custom(struct fs_file *file)
 
 int fs_read_custom(struct fs_file *file, char *buffer, int count)
 {
-    u32_t left;
-    if (!file || !buffer || count <= 0)
-        return FS_READ_EOF;
-    left = file->len - file->index;
-    if (left <= 0)
-        return FS_READ_EOF;
-    if ((u32_t)count > left)
-        count = left;
-    memcpy(buffer, file->data + file->index, count);
-    file->index += count;
-    return count;
+	int left;
+
+	if (!file || !buffer || count <= 0)
+		return FS_READ_EOF;
+
+#if LWIP_HTTPD_FILE_EXTENSION
+	if (file->pextension)
+		return recovery_read_mtd_backup(file, buffer, count);
+#endif
+
+	if (!file->data)
+		return FS_READ_EOF;
+
+	left = file->len - file->index;
+	if (left <= 0)
+		return FS_READ_EOF;
+	if (count > left)
+		count = left;
+	memcpy(buffer, file->data + file->index, count);
+	file->index += count;
+	return count;
 }
 
-/* Complete custom responses are supplied in file->data by fs_open_custom(). */
+/* Backup responses stream from MTD; small custom responses use file->data. */
 
 /* HTTP POST handlers */
 static bool recovery_upload_uri_matches(const char *uri, const char *path)
