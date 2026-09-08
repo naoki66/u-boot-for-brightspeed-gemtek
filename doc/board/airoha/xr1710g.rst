@@ -7,7 +7,7 @@ XR1710G 使用 Airoha AN7581 类 SoC，与 XG2010G 共用同一份
 ``arch/arm/dts/xr1710g.dts`` 表达。
 
 .. note::
-   关于启动链、BL2/BL31 与 Trusted Boot、NAND 分区、刷写边界和 X 模式
+   关于启动链、BL2/BL31、NAND 分区、刷写边界和 X 模式
    救砖等通用流程，请先阅读 :doc:`xg2010g`，本文档仅描述 XR1710G 专属
    差异。
 
@@ -19,7 +19,7 @@ XR1710G 使用 Airoha AN7581 类 SoC，与 XG2010G 共用同一份
 * 刷写 bootloader 或 NAND 前必须准备完整原厂备份，并确认 NAND 型号、
   容量、页大小、擦除块大小、ECC/OOB 方式和 BootROM 镜像格式完全匹配。
 * ``board/airoha/<board>/firmware`` 下只保留明确记录 SHA256 的最小启动
-  输入，不得提交完整原厂 mtd0、Trusted Boot 私钥或工厂校准数据。
+  输入，不得提交完整原厂 mtd0、签名私钥或工厂校准数据。
 
 硬件差异
 --------
@@ -123,9 +123,9 @@ X 模式救砖与 Web Recovery
 
 流程与 :doc:`xg2010g` 完全一致，仅下列与硬件相关的细节差异：
 
-* **Web Recovery 网口**：XR1710G 的两个恢复网口均指向 FE MDIO 上的
-  phy5/phy8（``net/lwip/httpd_recovery.c`` 按板区分）。建议使用 LAN1 或
-  LAN2 任一口（gdm4 / gdm2 USXGMII）。
+* **Web Recovery 网口**：仅监听 ``eth1`` / ``gdm1``，即内部 switch
+  CPU 口提供的 1G 网口。FE MDIO 上的 phy5/phy8 USXGMII 口不参与恢复页，
+  避免多个 ``192.168.1.1`` netif 同时收发导致 TCP 冲突。
 * **状态灯**：恢复页运行期间 sts 红/绿/蓝/白做呼吸跑马灯，使用 GPIO
   29/17/19/20（低有效）。启动日志应出现 ``Recovery status LEDs:
   gpio29(L) gpio17(L) gpio19(L) gpio20(L)``。若某盏灯明暗相反，把
@@ -154,7 +154,7 @@ X 模式救砖与 Web Recovery
    make CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)
 
 构建得到的 ``u-boot.bin`` 仅是 BL33 候选文件，需要按
-:doc:`xg2010g` 中 *BL2、BL31 与 Trusted Boot Key* 与 *GitHub Actions
-签名构建* 的流程封装为可刷写 ``mtd0`` 镜像。XR1710G 的 BL2/BL31 与
+:doc:`xg2010g` 中 *BL2、BL31 和签名材料* 与 *GitHub Actions 签名构建*
+的流程封装为可刷写 ``mtd0`` 镜像。XR1710G 的 BL2/BL31 与
 Airoha NAND 启动补丁当前共用 ``board/airoha/xg2010g/atf/`` 下的脚本，
 未来若 XR1710G 出现独立补丁，应迁至 ``board/airoha/an7581/atf/``。

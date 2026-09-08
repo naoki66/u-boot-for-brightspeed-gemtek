@@ -16,7 +16,7 @@ AN7581 支持，并在本项目中加入 XG2010G 的板级设备树。
 本仓库不得提交以下内容：
 
 * 完整原厂 mtd0、完整固件备份或未筛选的原厂二进制；
-* Trusted Boot 私钥、密钥目录、签名配置和未公开的证书材料；
+* 签名私钥、密钥目录、签名配置和未公开的证书材料；
 * 仅适用于单台设备的序列号、MAC 地址或工厂校准数据；
 * 构建目录和未经验证的最终刷写镜像。
 
@@ -37,8 +37,8 @@ AN7581 类平台的典型启动顺序如下：
 在使用 FIP 启动的设备上，mtd0 中应是与该平台 BootROM/BL2 约定的完整
 FIP，而不是只有 BL33 的裸 U-Boot。
 
-BL2、BL31 和 Trusted Boot Key
------------------------------
+BL2、BL31 和签名材料
+--------------------
 
 BL2 负责早期硬件与 DDR 初始化，BL31 提供 EL3 运行时环境。本项目使用固定版本
 的 TF-A ``v2.10``、Airoha AN7581 overlay、Mbed TLS 和 Arm GNU Toolchain
@@ -50,13 +50,13 @@ BL2 负责早期硬件与 DDR 初始化，BL31 提供 EL3 运行时环境。本�
 * ``cert_create`` 和 ``fiptool`` 生成证书链与完整 FIP。
 
 原厂 FIP 的证书链不能因为只替换了 BL33 就默认继续有效。若证书中包含
-BL33 的摘要，替换 BL33 后必须重新生成对应的内容证书和签名；若设备启用
-了锁定的 Trusted Boot，还必须使用设备认可的签名根。没有正确的签名密钥
+BL33 的摘要，替换 BL33 后必须重新生成对应的内容证书和签名；若设备要求
+固定签名根，还必须使用设备认可的签名根。没有正确的签名密钥
 或密钥授权时，新 FIP 可能在 BootROM 或 BL2 阶段被拒绝。
 
 已从原厂 mtd0 备份确认其包含 FIP 头 ``0xaa640001``，且 FIP 位于 mtd0
-偏移 ``0x800``。备份中可见 BL2、BL31、BL33/U-Boot 和 Trusted Boot
-证书。下面这些偏移仅用于分析原厂文件，不能当作所有 XG2010G 设备的
+偏移 ``0x800``。备份中可见 BL2、BL31、BL33/U-Boot 和签名证书。
+下面这些偏移仅用于分析原厂文件，不能当作所有 XG2010G 设备的
 通用格式：
 
 * BL2：FIP 相对偏移约 ``0x400``；
@@ -444,7 +444,7 @@ artifact：
 * 从固定的 Airoha TF-A 源码构建 BL2 和 BL31；
 * 使用仓库内置的 mtd0 前导区，也可用 Secret 或私有 URL 覆盖；
 * 使用 ``cert_create`` 为 ``--tb-fw`` BL2、``--soc-fw`` BL31 和
-  ``--nt-fw`` BL33 压缩载荷生成 Trusted Boot 证书链；
+  ``--nt-fw`` BL33 压缩载荷生成证书链；
 * 使用 ``fiptool create`` 生成 signed FIP；
 * 将 FIP 写入 2 MiB mtd0 镜像中的 ``0x800`` 偏移，前导区保持原厂内容，
   其余尾部填充 ``0xff``。
@@ -573,7 +573,9 @@ X 模式加载临时引导。该流程需要 TTL 串口和支持 XMODEM 的终�
 表示 BL23 已经进入第二阶段，但收到的 BL31 + U-Boot FIP 中的压缩镜像无效。先确认
 第二次 XMODEM 发送的是同板型 ``...-ubi-bl31-uboot.fip``，而不是
 ``...-mtd0-signed.bin``、``...-fip-signed.bin`` 或 ``...-ubi-preloader.bin``；
-再用 artifact 里的 ``sha256sums.txt`` 核对文件后重发。
+再用 artifact 里的 ``sha256sums.txt`` 核对文件后重发。若校验正确仍失败，
+继续确认 ``...-ubi-bl31-uboot.fip`` 是否超过 ``0x60000``；超过时 BL23
+第二段 XMODEM 可能截断 FIP，表现为同样的 LZMA ``res 2``。
 
 U-Boot 启动后会对 RESET GPIO 做确认：默认需要持续按住 3 秒才进入 Web
 Recovery，并在串口打印倒计时。中途松开会取消恢复并继续正常启动。可通过环境变量
@@ -615,9 +617,9 @@ FIP 流程封装，不能直接当作完整 mtd0 写入。
    fiptool info original.fip
    fiptool create --tb-fw bl2.bin --soc-fw bl31.bin --nt-fw u-boot.bin new.fip
 
-上面的命令只表示 FIP 中 BL2、BL31、BL33 的关系。真实设备如果启用
-Trusted Boot，通常还需要平台专用的证书、密钥、UUID、载入地址、签名参数
-和可能的额外固件项；不能直接照抄此示例生成可启动镜像。
+上面的命令只表示 FIP 中 BL2、BL31、BL33 的关系。真实设备通常还需要
+平台专用的证书、密钥、UUID、载入地址、签名参数和可能的额外固件项；
+不能直接照抄此示例生成可启动镜像。
 
 将 FIP 放入 mtd0 时，还要确认原厂镜像的前导数据、FIP 在 mtd0 中的偏移、
 NAND 坏块处理和 BootROM 的复制规则。建议先通过串口验证 U-Boot 能识别
@@ -654,10 +656,10 @@ ImmortalWrt ``an7581-xr1710g-ubi.dts``）：
 * RESET 键同为 ``en7581_pinctrl`` GPIO 0，低有效，Recovery 行为与 XG2010G
   完全一致。
 
-Recovery 的端口/PHY 映射在 ``net/lwip/httpd_recovery.c`` 中按板区分：
-XG2010G 使用 FE/switch 混合映射，XR1710G 两个恢复网口均指向 FE MDIO
-上的 phy5/phy8。两板的 Web Recovery 地址、无痕模式要求和 UBI 重建流程
-相同。
+Recovery 仅监听 ``eth1`` / ``gdm1``，即内部 switch CPU 口提供的 1G
+网口。XG2010G 的 RTL8261N/EN8811H XSI 口、XR1710G 的 phy5/phy8
+USXGMII 口不参与恢复页，避免多个 ``192.168.1.1`` netif 同时收发导致
+TCP 冲突。两板的 Web Recovery 地址、无痕模式要求和 UBI 重建流程相同。
 
 恢复网页资源
 ------------

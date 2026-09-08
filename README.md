@@ -101,7 +101,7 @@ signed mtd0/FIP。
 | signed FIP 在 mtd0 内偏移 | `0x800` |
 | U-Boot 加载地址 | `0x81800000` |
 | TTL/TFTP 网段 | U-Boot `192.168.0.1`，电脑 `192.168.0.205/24`（网线接设备 1G 口） |
-| Web Recovery | 无痕模式打开 `http://192.168.1.1/`，系统固件上传会自动重建 UBI |
+| Web Recovery | 网线接设备 1G 口，无痕模式打开 `http://192.168.1.1/`，系统固件上传会自动重建 UBI |
 
 > [!WARNING]
 > `mtd0` 的正确长度是 `0x200000`，即 2 MiB。使用其他擦写长度会越过
@@ -151,7 +151,7 @@ X 模式加载临时引导。
 8. 再次打开 XMODEM 发送。
 9. 发送 `<board>-...-ubi-bl31-uboot.fip`。
 10. 第二段 XMODEM 进度到 100% 前按住 <kbd>RESET</kbd>，等设备灯进入流水式闪烁后再松开。
-11. 浏览器使用**无痕模式**访问 `http://192.168.1.1/`（网线可接设备任一网口，含 WAN 口）。
+11. 网线接设备 **1G 口**，浏览器使用**无痕模式**访问 `http://192.168.1.1/`。
 12. 选择系统镜像 `ubi-squashfs-sysupgrade.itb`；`BL2` 选择
     `<board>-...-ubi-preloader.bin`，`U-Boot` 选择
     `<board>-...-ubi-bl31-uboot.fip`。
@@ -163,6 +163,8 @@ X 模式加载临时引导。
 > XMODEM 发送的是同板型的 `<board>-...-ubi-bl31-uboot.fip`，不是
 > `mtd0-signed.bin`、`fip-signed.bin` 或 `ubi-preloader.bin`；同时对照
 > `sha256sums.txt` 校验文件后再发一次。
+> 若校验正确仍失败，重点确认 `<board>-...-ubi-bl31-uboot.fip` 是否超过 `0x60000`；
+> 超过时 BL23 第二段 XMODEM 可能截断 FIP，表现为同样的 LZMA `res 2`。
 
 > [!CAUTION]
 > 必须使用**无痕（隐私）窗口**打开 `http://192.168.1.1/`。设备此前运行 OpenWrt 时，

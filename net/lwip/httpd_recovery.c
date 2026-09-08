@@ -148,8 +148,11 @@ unsigned long airoha_recovery_get_lan_activity_ms(void)
 #define RECOVERY_STATIC_IPADDR           "192.168.1.1"
 #define RECOVERY_STATIC_NETMASK          "255.255.255.0"
 #define RECOVERY_STATIC_GATEWAY          "0.0.0.0"
-/* One DHCP/HTTP endpoint per Ethernet device, 192.168.<seq+1>.1/24 each */
-#define RECOVERY_NETIF_MAX               4
+/* Web recovery is intentionally limited to the switch path serving 1G ports. */
+#define RECOVERY_NETIF_MAX               1
+#define RECOVERY_1G_ETH_ALIAS            "eth1"
+#define RECOVERY_1G_ETH_SEQ              1
+#define RECOVERY_ETHACT_SAVE_LEN         64
 #define RECOVERY_DHCP_BROADCAST_IPADDR   "192.168.1.255"
 #define RECOVERY_DHCP_LEASE_SECS         86400U
 #define RECOVERY_DHCP_MAX_MSG_LEN        1500
@@ -419,7 +422,6 @@ struct recovery_net_ctx {
 	struct udevice *udev;
 	struct netif *netif;
 	struct recovery_dhcp_server dhcp;
-	ulong last_link_poll;
 };
 
 static struct recovery_net_ctx recovery_nets[RECOVERY_NETIF_MAX];
@@ -427,139 +429,19 @@ static int recovery_net_count;
 /* Server owning the packet currently dispatched from net_lwip_rx() */
 static struct recovery_dhcp_server *recovery_rx_srv;
 
-/*
- * Real PHY link state for the recovery ports:
- *   XG2010G:
- *     eth0/gdm4 -> FE MDIO PHY5   (RTL8261N, clause 45)
- *     eth1/gdm1 -> switch CPU port (fixed link, always up)
- *     eth2/gdm3 -> FE MDIO PHY8   (RTL8261N, clause 45)
- *     eth3/gdm4 -> FE MDIO PHY15  (EN8811H, USB1 XSI)
- *   XR1710G:
- *     eth0/gdm4 -> FE MDIO PHY5   (RTL8261N, clause 45)
- *     eth1/gdm1 -> switch CPU port (fixed link, always up)
- *     eth2/gdm2 -> FE MDIO PHY8   (RTL8261N, clause 45)
- * Feeding netif_set_link_up/down() keeps lwIP's ip4_route() on the port
- * that actually has a cable: with all netifs sharing 192.168.1.1/24,
- * only the link-up netif is eligible for TCP reply routing. Ports
- * without a known PHY mapping stay link-up. Read errors are ignored so
- * a broken MDIO bus never takes a working port out of the routing pool.
- */
-struct recovery_phy_map {
-	unsigned int seq;
-	bool switch_mdio;
-	int phy;
+struct recovery_ethact_save {
+	bool valid;
+	char ethact[RECOVERY_ETHACT_SAVE_LEN];
 };
-
-static const struct recovery_phy_map recovery_phy_map_xg2010g[] = {
-	{ 0, false, 5 },
-	{ 2, false, 8 },
-	{ 3, false, 0xf },
-};
-
-static const struct recovery_phy_map recovery_phy_map_xr1710g[] = {
-	{ 0, false, 5 },
-	{ 2, false, 8 },
-};
-
-static const struct recovery_phy_map *recovery_phy_map(void)
-{
-	if (of_machine_is_compatible("gemtek,xr1710g") ||
-	    of_machine_is_compatible("gemtek,xr1710g-ubi") ||
-	    of_machine_is_compatible("econet,xr1710g") ||
-	    of_machine_is_compatible("econet,xr1710g-ubi"))
-		return recovery_phy_map_xr1710g;
-
-	return recovery_phy_map_xg2010g;
-}
-
-static const struct recovery_phy_map *recovery_phy_map_find(unsigned int seq)
-{
-	const struct recovery_phy_map *map = recovery_phy_map();
-	size_t count, i;
-
-	count = map == recovery_phy_map_xr1710g ?
-		ARRAY_SIZE(recovery_phy_map_xr1710g) :
-		ARRAY_SIZE(recovery_phy_map_xg2010g);
-
-	for (i = 0; i < count; i++)
-		if (map[i].seq == seq)
-			return &map[i];
-
-	return NULL;
-}
-
-static struct udevice *recovery_port_mdio_dev(unsigned int seq)
-{
-	static struct udevice *fe_mdio;
-	static struct udevice *sw_mdio;
-	const struct recovery_phy_map *entry;
-	struct udevice **dev;
-	ofnode node;
-
-	entry = recovery_phy_map_find(seq);
-	if (!entry)
-		return NULL;
-
-	dev = entry->switch_mdio ? &sw_mdio : &fe_mdio;
-	if (!*dev) {
-		if (entry->switch_mdio)
-			node = ofnode_path("/soc/switch@1fb58000/mdio");
-		else
-			node = ofnode_path("/mdio-bus");
-		if (!ofnode_valid(node))
-			return NULL;
-		uclass_get_device_by_ofnode(UCLASS_MDIO, node, dev);
-	}
-
-	return *dev;
-}
 
 void airoha_recovery_poll_link(struct udevice *dev)
 {
-	struct recovery_net_ctx *net = NULL;
-	const struct recovery_phy_map *entry;
-	struct udevice *mdio_dev;
-	unsigned int seq;
-	int phy, bmsr, i;
-
-	if (!recovery_net_count)
-		return;
-
-	for (i = 0; i < recovery_net_count; i++) {
-		if (recovery_nets[i].udev == dev) {
-			net = &recovery_nets[i];
-			break;
-		}
-	}
-	if (!net)
-		return;
-
-	seq = (unsigned int)dev_seq(dev);
-	entry = recovery_phy_map_find(seq);
-	if (!entry)
-		return;
-	phy = entry->phy;
-
-	if (get_timer(net->last_link_poll) < RECOVERY_LED_PHY_POLL_MS)
-		return;
-	net->last_link_poll = get_timer(0);
-
-	mdio_dev = recovery_port_mdio_dev(seq);
-	if (!mdio_dev)
-		return;
-
-	/* LSTATUS is latched low on link loss: read twice. */
-	bmsr = dm_mdio_read(mdio_dev, phy, MDIO_DEVAD_NONE, MII_BMSR);
-	if (bmsr < 0)
-		return;
-	bmsr = dm_mdio_read(mdio_dev, phy, MDIO_DEVAD_NONE, MII_BMSR);
-	if (bmsr < 0)
-		return;
-
-	if (bmsr & BMSR_LSTATUS)
-		netif_set_link_up(net->netif);
-	else
-		netif_set_link_down(net->netif);
+	/*
+	 * Recovery now uses only eth1/gdm1, the internal switch CPU port.
+	 * It is a fixed-link switch path, so no per-port MDIO route polling is
+	 * needed for TCP reply routing in the HTTP receive loop.
+	 */
+	(void)dev;
 }
 
 /*
@@ -3928,72 +3810,129 @@ printf("Failed to select UBI %s rebuild target: %d\n",
 	return 0;
 }
 
+static bool recovery_netdev_is_1g(struct udevice *dev)
+{
+	return dev && dev_seq(dev) == RECOVERY_1G_ETH_SEQ;
+}
+
+static int recovery_get_1g_eth(struct udevice **devp)
+{
+	struct udevice *dev;
+	int ret;
+
+	ret = uclass_get_device_by_seq(UCLASS_ETH, RECOVERY_1G_ETH_SEQ, &dev);
+	if (ret)
+		return ret;
+
+	if (!recovery_netdev_is_1g(dev))
+		return -ENODEV;
+
+	*devp = dev;
+	return 0;
+}
+
+static int recovery_select_1g_eth(struct recovery_ethact_save *save)
+{
+	const char *old_ethact;
+	struct udevice *dev;
+	int ret;
+
+	memset(save, 0, sizeof(*save));
+
+	old_ethact = env_get("ethact");
+	if (old_ethact) {
+		save->valid = true;
+		strlcpy(save->ethact, old_ethact, sizeof(save->ethact));
+	}
+
+	ret = recovery_get_1g_eth(&dev);
+	if (ret) {
+		printf("HTTP recovery: %s 1G switch port not found: %d\n",
+		       RECOVERY_1G_ETH_ALIAS, ret);
+		return ret;
+	}
+
+	ret = env_set("ethact", RECOVERY_1G_ETH_ALIAS);
+	if (ret) {
+		printf("HTTP recovery: failed to select %s: %d\n",
+		       RECOVERY_1G_ETH_ALIAS, ret);
+		return ret;
+	}
+
+	eth_set_dev(dev);
+	printf("HTTP recovery: using %s/gdm1 1G switch port (%s)\n",
+	       RECOVERY_1G_ETH_ALIAS, dev->name);
+
+	return 0;
+}
+
+static void recovery_restore_ethact(const struct recovery_ethact_save *save)
+{
+	int ret;
+
+	ret = env_set("ethact", save->valid ? save->ethact : NULL);
+	if (ret)
+		printf("HTTP recovery: failed to restore ethact: %d\n", ret);
+}
+
 /*
- * Bring up every Ethernet device so any port (LAN or WAN jack) accepts
- * DHCP and HTTP during recovery. All netifs share 192.168.1.1/24; the
- * per-port DHCP servers reply through their own netif, and TCP reply
- * routing stays correct because airoha_recovery_poll_link() drives
- * netif_set_link_up/down() from the real PHY link state, and lwIP's
- * ip4_route_src() only picks link-up netifs. Each netif keeps the
- * address configured via its per-sequence env vars when present.
+ * Bring up only the switch path serving the 1G recovery port. Earlier
+ * multi-port recovery used one 192.168.1.1 netif per Ethernet device, which
+ * made DHCP/TCP routing fragile when multiple PHY/XSI ports were active at
+ * the same time.
  */
 static int recovery_net_setup(void)
 {
+	struct recovery_net_ctx *net = &recovery_nets[0];
 	struct udevice *dev;
-	int count;
+	struct netif *netif;
+	char ipstr[IP4ADDR_STRLEN_MAX];
+	int ret;
 
-	count = 0;
-	for (dev = NULL; count < RECOVERY_NETIF_MAX;) {
-		struct recovery_net_ctx *net = &recovery_nets[count];
-		struct netif *netif;
-		char ipstr[IP4ADDR_STRLEN_MAX];
-
-		if (!dev) {
-			uclass_first_device(UCLASS_ETH, &dev);
-		} else {
-			uclass_next_device(&dev);
-		}
-		if (!dev)
-			break;
-
-		netif = net_lwip_new_netif_multi(dev);
-		if (!netif)
-			continue;
-
-		net->udev = dev;
-		net->netif = netif;
-		net->dhcp.netif = netif;
-
-		if (ip4_addr_isany(netif_ip4_addr(netif)) ||
-		    ip4_addr_isany(netif_ip4_netmask(netif))) {
-			ip4_addr_t ip, mask, gw;
-
-			ip4addr_aton(RECOVERY_STATIC_IPADDR, &ip);
-			ip4addr_aton(RECOVERY_STATIC_NETMASK, &mask);
-			ip4addr_aton(RECOVERY_STATIC_GATEWAY, &gw);
-			netif_set_addr(netif, &ip, &mask, &gw);
-			printf("Recovery netif %s configured statically: %s/%s\n",
-			       dev->name,
-			       ip4addr_ntoa_r(netif_ip4_addr(netif), ipstr,
-					      sizeof(ipstr)),
-			       RECOVERY_STATIC_NETMASK);
-		} else {
-			printf("Recovery netif %s: %s (env)\n", dev->name,
-			       ip4addr_ntoa_r(netif_ip4_addr(netif), ipstr,
-					      sizeof(ipstr)));
-		}
-
-		if (recovery_dhcp_server_init(&net->dhcp, netif))
-			printf("Failed to start recovery DHCP server on %s\n",
-			       dev->name);
-
-		if (!count)
-			netif_set_default(netif);
-		count++;
+	ret = recovery_get_1g_eth(&dev);
+	if (ret) {
+		printf("HTTP recovery: no 1G switch Ethernet device (%s): %d\n",
+		       RECOVERY_1G_ETH_ALIAS, ret);
+		recovery_net_count = 0;
+		return 0;
 	}
 
-	recovery_net_count = count;
-	return count;
+	netif = net_lwip_new_netif_multi(dev);
+	if (!netif) {
+		recovery_net_count = 0;
+		return 0;
+	}
+
+	net->udev = dev;
+	net->netif = netif;
+	net->dhcp.netif = netif;
+
+	if (ip4_addr_isany(netif_ip4_addr(netif)) ||
+	    ip4_addr_isany(netif_ip4_netmask(netif))) {
+		ip4_addr_t ip, mask, gw;
+
+		ip4addr_aton(RECOVERY_STATIC_IPADDR, &ip);
+		ip4addr_aton(RECOVERY_STATIC_NETMASK, &mask);
+		ip4addr_aton(RECOVERY_STATIC_GATEWAY, &gw);
+		netif_set_addr(netif, &ip, &mask, &gw);
+		printf("Recovery netif %s configured statically: %s/%s\n",
+		       dev->name,
+		       ip4addr_ntoa_r(netif_ip4_addr(netif), ipstr,
+				      sizeof(ipstr)),
+		       RECOVERY_STATIC_NETMASK);
+	} else {
+		printf("Recovery netif %s: %s (env)\n", dev->name,
+		       ip4addr_ntoa_r(netif_ip4_addr(netif), ipstr,
+				      sizeof(ipstr)));
+	}
+
+	if (recovery_dhcp_server_init(&net->dhcp, netif))
+		printf("Failed to start recovery DHCP server on %s\n",
+		       dev->name);
+
+	netif_set_default(netif);
+	recovery_net_count = 1;
+	return recovery_net_count;
 }
 
 static void recovery_net_teardown(void)
@@ -4017,6 +3956,7 @@ int run_http_recovery(void)
 {
 	struct recovery_led_ctrl leds;
 	struct recovery_status_led_ctrl status_leds;
+	struct recovery_ethact_save ethact_save;
 	bool use_status_leds = false;
 	bool dhcp_any = false;
 	int i, rc;
@@ -4045,10 +3985,20 @@ int run_http_recovery(void)
 	recovery_led_init(&leds);
 	recovery_prepare_static_network();
 
+	rc = recovery_select_1g_eth(&ethact_save);
+	if (rc) {
+		recovery_status_led_stop(&status_leds);
+		recovery_status_led_release(&status_leds);
+		recovery_led_stop(&leds);
+		recovery_led_ctrl_free(&leds);
+		return rc;
+	}
+
 	rc = net_lwip_eth_start();
 	if (rc < 0) {
 		printf("Failed to start Ethernet: %d\n", rc);
 		recovery_lwip_cleanup(NULL);
+		recovery_restore_ethact(&ethact_save);
 		recovery_status_led_stop(&status_leds);
 		recovery_status_led_release(&status_leds);
 		recovery_led_stop(&leds);
@@ -4065,6 +4015,7 @@ int run_http_recovery(void)
 		recovery_led_stop(&leds);
 		recovery_led_ctrl_free(&leds);
 		net_lwip_eth_stop();
+		recovery_restore_ethact(&ethact_save);
 		return -ENODEV;
 	}
 
@@ -4098,12 +4049,6 @@ int run_http_recovery(void)
 			}
 		}
 		/* net_lwip_rx() already runs sys_check_timeouts(). */
-		/* PHY/PCS MDIO probing is intentionally skipped while the HTTP POST
-		 * body is arriving. The Ethernet datapath is already primed before
-		 * the server starts; probing every main-loop iteration needlessly
-		 * serializes TCP ACKs behind several Clause-45 transactions and makes
-		 * LAN1/LAN2 uploads appear very slow. Resume probing once reception is
-		 * complete or when the server is idle. */
 		for (i = 0; i < recovery_net_count; i++) {
 			if (!post_ok || recv_off >= recv_total)
 				airoha_recovery_poll_link(recovery_nets[i].udev);
@@ -4142,6 +4087,7 @@ int run_http_recovery(void)
 	recovery_net_teardown();
 	recovery_lwip_cleanup(NULL);
 	net_lwip_eth_stop();
+	recovery_restore_ethact(&ethact_save);
 	recovery_status_led_stop(&status_leds);
 	recovery_status_led_release(&status_leds);
 	recovery_led_stop(&leds);

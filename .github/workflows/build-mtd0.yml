@@ -42,6 +42,7 @@ env:
   BL2_TOOLCHAIN_URL: https://gitlab.arm.com/api/v4/projects/tooling%2Fgnu-toolchains-for-arm/packages/generic/gnu-toolchain/15.3.rel1/arm-gnu-toolchain-15.3.rel1-x86_64-arm-none-eabi.tar.xz
   BL2_XMODEM_MAX_SIZE: "0x1f800"
   BL23_FIP_MAX_SIZE: "0x100000"
+  BL23_XMODEM_FIP_MAX_SIZE: "0x60000"
   BL33_LOAD_MAX_SIZE: "0x100000"
   BL_DECOMPRESS_INPUT_MAX_SIZE: "0x58000"
   CROSS_COMPILE: aarch64-linux-gnu-
@@ -407,7 +408,7 @@ jobs:
           BOARD: ${{ matrix.board }}
           BOARD_UPPER: ${{ steps.board_ids.outputs.board_upper }}
           FIP_OFFSET_DEC: ${{ steps.params.outputs.fip_offset_dec }}
-          # The Trusted Boot key is shared across supported boards. The vendor
+          # The signing key is shared across supported boards. The vendor
           # mtd0 prefix remains per-board because it is BootROM-specific.
           TB_PRIVATE_KEY: ${{ secrets.TB_PRIVATE_KEY }}
           TB_PRIVATE_KEY_B64: ${{ secrets.TB_PRIVATE_KEY_B64 }}
@@ -544,7 +545,7 @@ jobs:
           done
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
-      - name: Generate Trusted Boot certificates and FIP
+      - name: Generate certificates and FIP
         if: ${{ steps.signing.outputs.ready == 'true' }}
         env:
           BOARD: ${{ matrix.board }}
@@ -616,8 +617,8 @@ jobs:
             out/ubi-preloader.bin
 
           "$FIPTOOL" info out/ubi-preloader.bin | tee out/ubi-preloader-fip-info.txt
-          grep -q 'Trusted Boot Firmware BL2:' out/ubi-preloader-fip-info.txt
-          grep -q 'Trusted Boot Firmware BL2 certificate:' out/ubi-preloader-fip-info.txt
+          grep -q 'Firmware BL2:' out/ubi-preloader-fip-info.txt
+          grep -q 'Firmware BL2 certificate:' out/ubi-preloader-fip-info.txt
           check_fip_size out/ubi-preloader.bin "$((BL2_XMODEM_MAX_SIZE))"
 
           "$FIPTOOL" create \
@@ -639,7 +640,9 @@ jobs:
           cmp out/recovery-bl31-check.bin signing/bl31.bin
           cmp out/recovery-bl33-check.bin out/atf/bl33.bin
           rm -f out/recovery-bl31-check.bin out/recovery-bl33-check.bin
-          check_fip_size out/ubi-bl31-uboot.fip "$((BL23_FIP_MAX_SIZE))"
+          # BL23 串口救砖第二段的实际接收窗口比 NAND FIP 上限小；
+          # 超过 0x60000 会让 BL33 LZMA 流尾部被截断。
+          check_fip_size out/ubi-bl31-uboot.fip "$((BL23_XMODEM_FIP_MAX_SIZE))"
 
           # 应急 bootext 垫片：给 BL2 加 BootROM XMODEM 加载头，格式对照原厂
           # bootext.ram（magic 0xAA640001/0x12345678 + BL2 UUID + 载荷偏移/大小，
