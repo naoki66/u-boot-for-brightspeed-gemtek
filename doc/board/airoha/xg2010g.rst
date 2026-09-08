@@ -390,10 +390,11 @@ EN7581 使用六个独立的 ``serdes_*`` 参数。每个值是 12 位十六进�
 独立配置。原厂 ``serdes_ethernet=411`` 不应改成 ``421``，后者会把 Ethernet
 SerDes 的角色从 LAN 改成 WAN，和原厂 TTL 及端口映射不符。
 
-对应到本仓库 U-Boot recovery：``gdm4`` + FE MDIO ``phy5`` 是 LAN1/WAN
-10G RTL8261N 口，``gdm3`` + FE MDIO ``phy8`` 是 LAN2 10G RTL8261N 口。
+对应到完整硬件映射：``gdm4`` + FE MDIO ``phy5`` 是 LAN1/WAN 10G
+RTL8261N 口，``gdm3`` + FE MDIO ``phy8`` 是 LAN2 10G RTL8261N 口。
 LAN3 是原厂 ``eth0.5`` 的 USB1 XSI/HSGMII 通道，复用 ``gdm4`` 但使用
-独立的 QDMA/XSI 子通道，外接 MDIO ``0x0f`` 的 EN8811H 2.5G PHY。
+独立的 QDMA/XSI 子通道，外接 MDIO ``0x0f`` 的 EN8811H 2.5G PHY。当前
+U-Boot recovery DTS 不启用这些外部 XSI 口，仅启用 ``gdm1``。
 
 校核依据
 ~~~~~~~~
@@ -656,10 +657,11 @@ ImmortalWrt ``an7581-xr1710g-ubi.dts``）：
 * RESET 键同为 ``en7581_pinctrl`` GPIO 0，低有效，Recovery 行为与 XG2010G
   完全一致。
 
-Recovery 仅监听 ``eth1`` / ``gdm1``，即内部 switch CPU 口提供的 1G
-网口。XG2010G 的 RTL8261N/EN8811H XSI 口、XR1710G 的 phy5/phy8
-USXGMII 口不参与恢复页，避免多个 ``192.168.1.1`` netif 同时收发导致
-TCP 冲突。两板的 Web Recovery 地址、无痕模式要求和 UBI 重建流程相同。
+Recovery 仅启用并监听 ``eth0`` / ``gdm1``，即内部 switch CPU 口提供的
+1G 网口。XG2010G 的 RTL8261N/EN8811H XSI 口、XR1710G 的 phy5/phy8
+USXGMII 口不在 U-Boot recovery DTS 中启用，避免多 MAC 随机地址和多个
+``192.168.1.1`` netif 同时收发导致 TCP 冲突。两板的 Web Recovery 地址、
+无痕模式要求和 UBI 重建流程相同。
 
 恢复网页资源
 ------------

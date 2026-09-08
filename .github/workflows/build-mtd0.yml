@@ -56,6 +56,7 @@ env:
   LZMA_SOURCE_SHA256: dcbdb5f4843eff638e4a5e8be0e2486a3c5483df73c70823618db8e66f609ec2
   LZMA_SOURCE_URL: https://sources.openwrt.org/lzma-4.65.tar.bz2
   MBEDTLS_REF: 72718dd87e087215ce9155a826ee5a66cfbe9631
+  MTD0_FIP_PLAT_TOC_FLAGS: "1"
 
 permissions:
   contents: read
@@ -586,8 +587,11 @@ jobs:
             --nt-fw-key-cert certs/nt_fw_key.crt \
             --nt-fw-cert certs/nt_fw.crt
 
+          # Airoha BL23 checks BYPASS_FWUPGRADE (bit 0 in platform ToC flags)
+          # before booting a NAND FIP while the fw-upgrade strap is active.
           "$FIPTOOL" create \
             --align "$FIP_ALIGN" \
+            --plat-toc-flags "$MTD0_FIP_PLAT_TOC_FLAGS" \
             --tb-fw signing/bl2.bin \
             --soc-fw signing/bl31.bin \
             --nt-fw out/atf/bl33.bin \
@@ -600,6 +604,25 @@ jobs:
             out/fip-${BOARD}-signed.bin
 
           "$FIPTOOL" info out/fip-${BOARD}-signed.bin | tee out/fip-info.txt
+          python3 - <<'PY'
+          import os
+          import struct
+          from pathlib import Path
+
+          image = Path(f"out/fip-{os.environ['BOARD']}-signed.bin")
+          header = image.read_bytes()[:16]
+          name, _serial, flags = struct.unpack("<IIQ", header)
+          if name != 0xAA640001:
+              raise SystemExit(f"{image} has invalid FIP magic 0x{name:08x}")
+          plat_toc_flags = (flags >> 32) & 0xffff
+          required = int(os.environ["MTD0_FIP_PLAT_TOC_FLAGS"], 16)
+          if (plat_toc_flags & required) != required:
+              raise SystemExit(
+                  f"{image} platform ToC flags 0x{plat_toc_flags:04x} "
+                  f"do not include required 0x{required:04x}"
+              )
+          print(f"FIP platform ToC flags: 0x{plat_toc_flags:04x}")
+          PY
           "$FIPTOOL" unpack --force \
             --soc-fw out/fip-bl31-check.bin \
             --nt-fw out/fip-bl33-check.bin \

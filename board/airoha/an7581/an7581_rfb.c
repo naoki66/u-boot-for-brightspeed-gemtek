@@ -85,13 +85,8 @@ static const struct xg2010g_ubi_layout *xg2010g_active_ubi_layout =
 static bool xg2010g_ubi_layout_probed;
 static bool xg2010g_ubi_layout_available;
 
-static const char *const xg2010g_fdt_lan_mac_paths[] = {
+static const char *const xg2010g_fdt_recovery_mac_paths[] = {
 	"/soc/ethernet@1fb50000/ethernet@1",
-	"/soc/ethernet@1fb50000/ethernet@4",
-};
-
-static const char *const xg2010g_fdt_wan_mac_paths[] = {
-	"/soc/ethernet@1fb50000/ethernet@2",
 };
 
 /*
@@ -463,6 +458,44 @@ out:
 	return ret;
 }
 
+static int xg2010g_get_dsd_recovery_ethaddr(u8 *mac)
+{
+	char *buf;
+	char mac_str[ARP_HLEN_ASCII + 1];
+	int ret;
+
+	buf = malloc(XG2010G_DSD_ENV_SIZE + 1);
+	if (!buf)
+		return -ENOMEM;
+
+	ret = xg2010g_read_dsd_data(0, XG2010G_DSD_ENV_SIZE, buf);
+	if (ret)
+		goto out;
+
+	buf[XG2010G_DSD_ENV_SIZE] = '\0';
+
+	ret = xg2010g_dsd_get_var(buf, XG2010G_DSD_ENV_SIZE, "lan_mac=",
+				  mac_str, sizeof(mac_str));
+	if (ret)
+		ret = xg2010g_dsd_get_var(buf, XG2010G_DSD_ENV_SIZE,
+					  "wan_mac=", mac_str,
+					  sizeof(mac_str));
+	if (ret)
+		goto out;
+
+	string_to_enetaddr(mac_str, mac);
+	if (!is_valid_ethaddr(mac)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = 0;
+
+out:
+	free(buf);
+	return ret;
+}
+
 static int xg2010g_create_ubi_volume(const char *name, size_t size)
 {
 	struct ubi_mkvol_req req;
@@ -792,57 +825,40 @@ int xg2010g_sync_factory(void)
 	return xg2010g_sync_factory_part(part);
 }
 
-static void xg2010g_mac_add(const u8 *base, u8 delta, u8 *mac)
-{
-	int i;
-	unsigned int carry = delta;
-
-	memcpy(mac, base, ARP_HLEN);
-	for (i = ARP_HLEN - 1; i >= 0 && carry; i--) {
-		carry += mac[i];
-		mac[i] = carry & 0xff;
-		carry >>= 8;
-	}
-}
-
-static int xg2010g_get_runtime_ethaddrs(u8 *lan_mac, u8 *wan_mac)
+static int xg2010g_get_runtime_ethaddr(u8 *mac)
 {
 	int ret;
 
-	ret = xg2010g_get_dsd_ethaddrs(lan_mac, wan_mac);
+	ret = xg2010g_get_dsd_recovery_ethaddr(mac);
 	if (!ret)
 		return 0;
 
-	if (!eth_env_get_enetaddr("ethaddr", lan_mac) ||
-	    !is_valid_ethaddr(lan_mac))
-		return ret;
+	if (eth_env_get_enetaddr("ethaddr", mac) && is_valid_ethaddr(mac))
+		return 0;
 
-	if (!eth_env_get_enetaddr("eth1addr", wan_mac) ||
-	    !is_valid_ethaddr(wan_mac))
-		xg2010g_mac_add(lan_mac, 4, wan_mac);
+	if (eth_env_get_enetaddr("eth1addr", mac) && is_valid_ethaddr(mac))
+		return 0;
 
-	return 0;
+	return ret;
 }
 
 static void xg2010g_sync_runtime_ethaddrs(void)
 {
-	u8 lan_mac[ARP_HLEN], wan_mac[ARP_HLEN];
+	u8 mac[ARP_HLEN];
 	int ret;
 
 	if (!xg2010g_is_compatible())
 		return;
 
-	ret = xg2010g_get_runtime_ethaddrs(lan_mac, wan_mac);
+	ret = xg2010g_get_runtime_ethaddr(mac);
 	if (ret) {
-		printf("XG2010G: failed to obtain runtime MACs from DSD or env: %d\n",
+		printf("XG2010G: failed to obtain recovery MAC from DSD or env: %d\n",
 		       ret);
 		return;
 	}
 
-	eth_env_set_enetaddr("ethaddr", lan_mac);
-	eth_env_set_enetaddr("eth1addr", wan_mac);
-	printf("XG2010G: runtime MACs LAN=%pM WAN=%pM\n",
-	       lan_mac, wan_mac);
+	eth_env_set_enetaddr("ethaddr", mac);
+	printf("XG2010G: recovery MAC=%pM\n", mac);
 }
 
 static int xg2010g_fdt_set_mac(void *blob, const char *path, const u8 *mac)
@@ -862,29 +878,22 @@ static int xg2010g_fdt_set_mac(void *blob, const char *path, const u8 *mac)
 
 static void xg2010g_fixup_fdt_macs(void *blob)
 {
-	u8 lan_mac[ARP_HLEN], wan_mac[ARP_HLEN];
+	u8 mac[ARP_HLEN];
 	int i, ret;
 
 	if (!xg2010g_is_compatible())
 		return;
 
-	if (xg2010g_get_runtime_ethaddrs(lan_mac, wan_mac))
+	if (xg2010g_get_runtime_ethaddr(mac))
 		return;
 
-	for (i = 0; i < ARRAY_SIZE(xg2010g_fdt_lan_mac_paths); i++) {
-		ret = xg2010g_fdt_set_mac(blob, xg2010g_fdt_lan_mac_paths[i],
-					  lan_mac);
+	for (i = 0; i < ARRAY_SIZE(xg2010g_fdt_recovery_mac_paths); i++) {
+		ret = xg2010g_fdt_set_mac(blob,
+					  xg2010g_fdt_recovery_mac_paths[i],
+					  mac);
 		if (ret && ret != -FDT_ERR_NOTFOUND)
 			printf("XG2010G: failed to update MAC for %s: %d\n",
-			       xg2010g_fdt_lan_mac_paths[i], ret);
-	}
-
-	for (i = 0; i < ARRAY_SIZE(xg2010g_fdt_wan_mac_paths); i++) {
-		ret = xg2010g_fdt_set_mac(blob, xg2010g_fdt_wan_mac_paths[i],
-					  wan_mac);
-		if (ret && ret != -FDT_ERR_NOTFOUND)
-			printf("XG2010G: failed to update MAC for %s: %d\n",
-			       xg2010g_fdt_wan_mac_paths[i], ret);
+			       xg2010g_fdt_recovery_mac_paths[i], ret);
 	}
 }
 
@@ -1077,7 +1086,7 @@ int board_late_init(void)
 	env_set("ipaddr", "192.168.1.1");
 	env_set("netmask", "255.255.255.0");
 	env_set("gatewayip", "0.0.0.0");
-	printf("%s recovery network: eth1/gdm1 1G switch port only\n",
+	printf("%s recovery network: eth0/gdm1 1G switch port only\n",
 	       xr1710g_is_compatible() ? "XR1710G" : "XG2010G");
 
 	/*

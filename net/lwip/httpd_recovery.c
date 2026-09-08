@@ -150,8 +150,8 @@ unsigned long airoha_recovery_get_lan_activity_ms(void)
 #define RECOVERY_STATIC_GATEWAY          "0.0.0.0"
 /* Web recovery is intentionally limited to the switch path serving 1G ports. */
 #define RECOVERY_NETIF_MAX               1
-#define RECOVERY_1G_ETH_ALIAS            "eth1"
-#define RECOVERY_1G_ETH_SEQ              1
+#define RECOVERY_1G_ETH_ALIAS            "eth0"
+#define RECOVERY_1G_ETH_SEQ              0
 #define RECOVERY_ETHACT_SAVE_LEN         64
 #define RECOVERY_DHCP_BROADCAST_IPADDR   "192.168.1.255"
 #define RECOVERY_DHCP_LEASE_SECS         86400U
@@ -437,7 +437,7 @@ struct recovery_ethact_save {
 void airoha_recovery_poll_link(struct udevice *dev)
 {
 	/*
-	 * Recovery now uses only eth1/gdm1, the internal switch CPU port.
+	 * Recovery now uses only eth0/gdm1, the internal switch CPU port.
 	 * It is a fixed-link switch path, so no per-port MDIO route polling is
 	 * needed for TCP reply routing in the HTTP receive loop.
 	 */

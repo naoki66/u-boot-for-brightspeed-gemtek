@@ -12,99 +12,18 @@
 
 / {
 	aliases {
-		ethernet0 = &gdm4;
-		ethernet1 = &gdm1;
-		ethernet2 = &gdm3;
-		ethernet3 = &gdm4_usb;
+		ethernet0 = &gdm1;
 	};
 };
 
-/* Enable the FE/QDMA block and the MACs used by the XG2010G ports. */
+/* Enable the FE/QDMA block for the single recovery path. */
 &eth {
-	pinctrl-names = "default";
-	pinctrl-0 = <&mdio_pins>;
 	status = "okay";
 };
 
-&en7581_pinctrl {
-	mdio_pins: mdio-pins {
-		mux {
-			function = "mdio";
-			groups = "mdio";
-		};
-	};
-};
-
-/* External PHYs are on the FE MDIO controller, not the switch MDIO block. */
-/ {
-	mdio-bus {
-		compatible = "airoha,arht-mdio";
-		#address-cells = <1>;
-		#size-cells = <0>;
-
-		phy5: ethernet-phy@5 {
-			compatible = "ethernet-phy-ieee802.3-c45";
-			reg = <5>;
-			reset-gpios = <&en7581_pinctrl 29 GPIO_ACTIVE_LOW>;
-			reset-assert-us = <200000>;
-			reset-deassert-us = <200000>;
-		};
-
-		phy8: ethernet-phy@8 {
-			compatible = "ethernet-phy-ieee802.3-c45";
-			reg = <8>;
-			reset-gpios = <&en7581_pinctrl 27 GPIO_ACTIVE_LOW>;
-			reset-assert-us = <200000>;
-			reset-deassert-us = <200000>;
-		};
-
-		/* EN8811H firmware is loaded by the first-stage boot chain. */
-		phyf: ethernet-phy@f {
-			compatible = "ethernet-phy-ieee802.3-c22";
-			reg = <0xf>;
-			status = "okay";
-		};
-	};
-};
-
+/* gdm1 is the internal switch CPU port used by Web Recovery. */
 &gdm1 {
 	status = "okay";
-};
-
-/* LAN2: vendor eth0.7 / hsgmii_lan_pcie1, RTL8261N at FE MDIO 8. */
-&gdm3 {
-	status = "okay";
-	managed = "in-band-status";
-	phy-mode = "usxgmii";
-	phy-handle = <&phy8>;
-	airoha,xsi-channel = <11>;
-	airoha,xsi-nboq = <5>;
-	airoha,xsi-src-port = <0x17>;
-};
-
-/* LAN1/WAN: vendor eth0.8 / hsgmii_lan_eth, RTL8261N at FE MDIO 5. */
-&gdm4 {
-	status = "okay";
-	managed = "in-band-status";
-	phy-mode = "usxgmii";
-	phy-handle = <&phy5>;
-	airoha,xsi-channel = <13>;
-	airoha,xsi-nboq = <0>;
-	airoha,xsi-src-port = <0x18>;
-};
-
-&eth {
-	/* LAN3: vendor eth0.5 / USB1 XSI, EN8811H at FE MDIO 0xf. */
-	gdm4_usb: ethernet-usb@4 {
-		compatible = "airoha,eth-mac";
-		reg = <4>;
-		phy-mode = "2500base-x";
-		phy-handle = <&phyf>;
-		airoha,xsi-channel = <12>;
-		airoha,xsi-nboq = <1>;
-		airoha,xsi-src-port = <0x19>;
-		status = "okay";
-	};
 };
 
 &snfi {

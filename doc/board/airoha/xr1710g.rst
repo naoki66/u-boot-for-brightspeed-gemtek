@@ -123,9 +123,10 @@ X 模式救砖与 Web Recovery
 
 流程与 :doc:`xg2010g` 完全一致，仅下列与硬件相关的细节差异：
 
-* **Web Recovery 网口**：仅监听 ``eth1`` / ``gdm1``，即内部 switch
-  CPU 口提供的 1G 网口。FE MDIO 上的 phy5/phy8 USXGMII 口不参与恢复页，
-  避免多个 ``192.168.1.1`` netif 同时收发导致 TCP 冲突。
+* **Web Recovery 网口**：仅启用并监听 ``eth0`` / ``gdm1``，即内部
+  switch CPU 口提供的 1G 网口。FE MDIO 上的 phy5/phy8 USXGMII 口不在
+  U-Boot recovery DTS 中启用，避免多 MAC 随机地址和多个 ``192.168.1.1``
+  netif 同时收发导致 TCP 冲突。
 * **状态灯**：恢复页运行期间 sts 红/绿/蓝/白做呼吸跑马灯，使用 GPIO
   29/17/19/20（低有效）。启动日志应出现 ``Recovery status LEDs:
   gpio29(L) gpio17(L) gpio19(L) gpio20(L)``。若某盏灯明暗相反，把
