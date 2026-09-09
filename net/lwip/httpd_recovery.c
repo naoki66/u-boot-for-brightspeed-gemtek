@@ -154,6 +154,7 @@ unsigned long airoha_recovery_get_lan_activity_ms(void)
 #define RECOVERY_1G_ETH_SEQ              0
 #define RECOVERY_ETHACT_SAVE_LEN         64
 #define RECOVERY_DHCP_BROADCAST_IPADDR   "192.168.1.255"
+#define RECOVERY_DHCP_CLIENT_HOST        2U
 #define RECOVERY_DHCP_LEASE_SECS         86400U
 #define RECOVERY_DHCP_MAX_MSG_LEN        1500
 #define RECOVERY_LED_MAX_PORTS 2
@@ -1234,6 +1235,28 @@ static int recovery_dhcp_get_ip4_option(const u8 *pkt, int pkt_len, u8 code,
 	return 0;
 }
 
+/*
+ * ip4_addr_t is carried as wire-order bytes. Do subnet arithmetic on a
+ * normalized dotted-octet scalar so host constants stay byte-order neutral.
+ */
+static u32 recovery_dhcp_ip4_to_scalar(const ip4_addr_t *addr)
+{
+	const u8 *b = (const u8 *)&addr->addr;
+
+	return ((u32)b[0] << 24) | ((u32)b[1] << 16) |
+	       ((u32)b[2] << 8) | b[3];
+}
+
+static void recovery_dhcp_scalar_to_ip4(ip4_addr_t *addr, u32 value)
+{
+	u8 *b = (u8 *)&addr->addr;
+
+	b[0] = (u8)(value >> 24);
+	b[1] = (u8)(value >> 16);
+	b[2] = (u8)(value >> 8);
+	b[3] = (u8)value;
+}
+
 static int recovery_dhcp_put_option_head(u8 *options, int off, u8 code, u8 len)
 {
 	if (off < 0 || off + 2 + len > DHCP_OPTIONS_LEN)
@@ -1512,6 +1535,7 @@ static int recovery_dhcp_server_init(struct recovery_dhcp_server *srv,
 	char netmask[IP4ADDR_STRLEN_MAX];
 	char router[IP4ADDR_STRLEN_MAX];
 	char broadcast[IP4ADDR_STRLEN_MAX];
+	u32 server_addr, netmask_addr, network_addr;
 	err_t err;
 
 	memset(srv, 0, sizeof(*srv));
@@ -1525,18 +1549,23 @@ static int recovery_dhcp_server_init(struct recovery_dhcp_server *srv,
 	if (ip4_addr_isany(&srv->router))
 		ip4_addr_copy(srv->router, srv->server_ip);
 
-	/* Offer the first usable host address of the port's own subnet so
-	 * multi-port setups (192.168.<seq+1>.1/24 each) stay consistent.
-	 * lwIP stores ip4_addr_t in network byte order. */
-	srv->client_ip.addr = (srv->server_ip.addr & srv->netmask.addr) |
-			      PP_HTONL(0x2);
+	server_addr = recovery_dhcp_ip4_to_scalar(&srv->server_ip);
+	netmask_addr = recovery_dhcp_ip4_to_scalar(&srv->netmask);
+	network_addr = server_addr & netmask_addr;
+
+	/*
+	 * Offer 192.168.1.2 for the normal recovery /24 instead of relying on
+	 * PP_HTONL() for the host-number bit position.
+	 */
+	recovery_dhcp_scalar_to_ip4(&srv->client_ip,
+				    network_addr | RECOVERY_DHCP_CLIENT_HOST);
 
 	if (ip4_addr_isany(&srv->netmask)) {
 		if (!ip4addr_aton(RECOVERY_DHCP_BROADCAST_IPADDR, &srv->broadcast))
 			return -EINVAL;
 	} else {
-		srv->broadcast.addr = (srv->server_ip.addr & srv->netmask.addr) |
-				      ~srv->netmask.addr;
+		recovery_dhcp_scalar_to_ip4(&srv->broadcast,
+					    network_addr | ~netmask_addr);
 	}
 
 	srv->pcb = udp_new();
