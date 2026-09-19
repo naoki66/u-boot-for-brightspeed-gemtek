@@ -57,7 +57,14 @@ env:
   LZMA_SOURCE_URL: https://sources.openwrt.org/lzma-4.65.tar.bz2
   MBEDTLS_REF: 72718dd87e087215ce9155a826ee5a66cfbe9631
   MTD0_FIP_PLAT_TOC_FLAGS: "1"
-  MTD0_PREFIX_MODE: "zero"
+  # The 0x800 bytes before the FIP are not padding and must not be zero.
+  # The vendor bootloader writes the FIP into an erased 2 MiB region
+  # (`mw.b $loadaddr 0xff 0x20000` then `mtd write bl2 $loadaddr 0 0x20000`),
+  # so the accepted prefixes are the vendor's own prefix ("stock", identified
+  # by its ARM NOP sled at mtd0+0) or erased flash ("erased", 0xFF).  A
+  # zero-filled prefix is neither, and a board flashed with one does not boot
+  # from NAND.
+  MTD0_PREFIX_MODE: "stock"
 
 permissions:
   contents: read
@@ -449,7 +456,13 @@ jobs:
           missing=()
 
           case "$MTD0_PREFIX_MODE" in
-            stock|zero)
+            stock|erased)
+              ;;
+            zero)
+              echo "MTD0_PREFIX_MODE=zero is no longer supported: a zero-filled" >&2
+              echo "prefix is neither the vendor prefix nor erased flash and the" >&2
+              echo "board will not boot from NAND. Use stock (preferred) or erased." >&2
+              exit 1
               ;;
             *)
               echo "Invalid MTD0_PREFIX_MODE=${MTD0_PREFIX_MODE}" >&2
@@ -518,8 +531,8 @@ jobs:
 
           cp out/atf/bl2.bin signing/bl2.bin
           cp out/atf/bl31.bin signing/bl31.bin
-          if [ "$MTD0_PREFIX_MODE" = "zero" ]; then
-            echo "Using zero-filled mtd0 prefix before FIP offset ${FIP_OFFSET_DEC}"
+          if [ "$MTD0_PREFIX_MODE" = "erased" ]; then
+            echo "Using erased (0xFF) mtd0 prefix before FIP offset ${FIP_OFFSET_DEC}"
           else
             if [ -n "$MTD0_PREFIX_B64$MTD0_PREFIX_URL" ]; then
               restore_binary "mtd0 prefix" "$MTD0_PREFIX_B64" "$MTD0_PREFIX_URL" signing/mtd0-prefix.bin "$MTD0_PREFIX_SHA256" \

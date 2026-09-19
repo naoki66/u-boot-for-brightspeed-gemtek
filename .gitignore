@@ -163,3 +163,7 @@ __pycache__
 DUMPTMP/
 mtd*.dump
 original-device-backup-*/
+/temp
+# local analysis scratch + hand-built recovery images (never commit)
+/.codex-build/
+/recovery/

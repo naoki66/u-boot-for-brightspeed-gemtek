@@ -513,7 +513,8 @@ BootROM 专属字节段，XG2010G 与 XR1710G 的资源不可互换：
    * - 文件
      - 用途
    * - ``...-mtd0-signed.bin``
-     - 完整 2 MiB ``/dev/mtd0`` bootloader 镜像，包含前导区、BL2、BL31、证书和 U-Boot/BL33
+     - 完整 2 MiB ``/dev/mtd0`` bootloader 镜像：原厂前导区 + 偏移 ``0x800`` 处的 FIP
+       （BL2、BL31、证书、U-Boot/BL33）
    * - ``...-fip-signed.bin``
      - 放入 mtd0 ``0x800`` 偏移的完整 signed FIP
    * - ``...-ubi-preloader.bin``
@@ -530,6 +531,66 @@ BootROM 专属字节段，XG2010G 与 XR1710G 的资源不可互换：
 artifact 内也保留固定文件名的 ``ubi-preloader.bin``（BL2 + ``tb-fw-cert`` signed FIP）、
 ``ubi-bl31-uboot.fip``、``bl31.bin`` 和 ``u-boot-raw.bin``，方便救砖时
 直接选择文件。
+
+mtd0 前导区：原厂前缀或已擦除（0xFF），不能用零填充
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``mtd0`` 的 ``0x0000..0x07ff`` 不是留白，但也不需要专门写什么"引导代码"。原厂
+U-Boot 自带的 TFTP 刷写助手说明了它到底是什么：
+
+.. code-block:: text
+
+   boot_tftp_write_bl2=mw.b $loadaddr 0xff 0x20000
+                       setexpr loadaddr_bl2 $loadaddr + 0x800
+                       tftpboot $loadaddr_bl2 $bootfile_bl2 && run mtd_write_bl2
+   mtd_write_bl2=itest.l $filesize -le 0x1f800 && mtd erase bl2 && \
+                 mtd write bl2 $loadaddr 0 0x20000
+
+即原厂把一个正好 2 MiB 的缓冲区**整块填 0xFF**，FIP 放在 ``+0x800``，然后整
+2 MiB 写进分区。所以前导区的合法取值是：
+
+* **已擦除**（全 ``0xFF``）—— 原厂做法；
+* **原厂前导区**（``mtd0+0`` 是 ARM NOP 滑板 ``0xe320f000``）—— 仓库的
+  ``MTD0_PREFIX_MODE=stock``，最保守，原样保留本机原厂数据。
+
+**零填充（全 ``0x00``）不是合法取值**：它既不是原厂前缀、也不是已擦除的 flash，
+用这种镜像刷机后设备不从 NAND 启动。CI 因此把 ``MTD0_PREFIX_MODE`` 固定为
+``stock``，并彻底移除了旧的 ``zero`` 模式；U-Boot 恢复服务也同时拒绝全零前导区
+（只接受 NOP 滑板或全 ``0xFF``）。
+
+实测确认的 mtd0 字节布局（XG2010G）：
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 20 58
+
+   * - mtd0 偏移
+     - 长度
+     - 内容
+   * - ``0x000000``
+     - ``0x800``
+     - 原厂前导区（首字 ``e320f000``）或全 ``0xFF``；**不能是 0x00**
+   * - ``0x000800``
+     - ``0x10``
+     - FIP 头：magic ``0xaa640001``、serial ``0x12345678``、platform ToC flags
+   * - ``0x000810``
+     - ``40 × N``
+     - FIP ToC 条目：UUID(16) + 偏移(8) + 长度(8) + flags(8)
+   * - ``0x000C00``
+     - ``0x1a394``
+     - BL2 载荷（FIP 相对 ``0x400``）
+   * - ``0x001B000``
+     - ``0xad64``
+     - BL31
+   * - ``0x0026000``
+     - ``0x49c97``
+     - BL33 / U-Boot
+   * - ``0x0070000``
+     - ...
+     - 证书链（到 ``0x73248`` 结束）
+   * - ``0x073248``
+     - ``0x18cdb8``
+     - ``0xFF`` 填充到 2 MiB
 
 X 模式救砖
 ----------
@@ -560,11 +621,19 @@ X 模式加载临时引导。该流程需要 TTL 串口和支持 XMODEM 的终�
    发送 ``...-ubi-bl31-uboot.fip`` 或 ``ubi-bl31-uboot.fip``。
 5. 关键时序：第二段 XMODEM 进度到 100% 前提前按住 ``RESET``，等待设备灯
    完成闪烁并进入流水式闪烁后再松开。
-6. 浏览器使用无痕模式访问 ``http://192.168.1.1/``。必须用无痕（隐私）窗口：
+6. 浏览器使用无痕模式访问 ``http://192.168.0.1/``。必须用无痕（隐私）窗口：
    设备此前运行 OpenWrt 时，同一地址曾由 LuCI 提供 301 跳转到登录页
-   ``http://192.168.1.1/cgi-bin/luci/``，普通窗口可能命中浏览器缓存的跳转记录，
+   ``http://192.168.0.1/cgi-bin/luci/``，普通窗口可能命中浏览器缓存的跳转记录，
    打开的是 OpenWrt 登录页而非 Recovery 页；若仍出现 LuCI 页面，按 ``Ctrl+F5``
    强制刷新。
+
+   .. note::
+
+      ``192.168.0.1`` 是 U-Boot 内置的默认恢复地址，与原厂 Web Recovery
+      一致。若设备的 ``uenv`` 分区里已经保存了 ``ipaddr``，U-Boot 会沿用该
+      地址而不是默认值；此时请以串口打印的
+      ``recovery network: eth0/gdm1 1G switch port only, http://<addr>/``
+      为准，或先执行 ``setenv ipaddr 192.168.0.1`` 再重试。
 7. 选择 ``ubi-squashfs-sysupgrade.itb``；``BL2`` 选择
    ``...-ubi-preloader.bin``，``U-Boot`` 选择 ``...-ubi-bl31-uboot.fip``。
 8. 系统固件上传会自动擦除并重建完整 UBI，等待数分钟完成刷写。
@@ -660,7 +729,7 @@ ImmortalWrt ``an7581-xr1710g-ubi.dts``）：
 Recovery 仅启用并监听 ``eth0`` / ``gdm1``，即内部 switch CPU 口提供的
 1G 网口。XG2010G 的 RTL8261N/EN8811H XSI 口、XR1710G 的 phy5/phy8
 USXGMII 口不在 U-Boot recovery DTS 中启用，避免多 MAC 随机地址和多个
-``192.168.1.1`` netif 同时收发导致 TCP 冲突。两板的 Web Recovery 地址、
+``192.168.0.1`` netif 同时收发导致 TCP 冲突。两板的 Web Recovery 地址、
 无痕模式要求和 UBI 重建流程相同。
 
 恢复网页资源

@@ -422,7 +422,7 @@ button,input,select{font:inherit;letter-spacing:0}
       <button class='reboot-button' id='reboot-button' type='button'>Reboot to System</button>
     </div>
     <div class='side-meta'>
-      <strong>192.168.1.1</strong>
+      <strong id='recovery-address'>192.168.0.1</strong>
       <a class='version-link' href='https://github.com/naoki66/u-boot-for-brightspeed-gemtek/releases' target='_blank' rel='noopener'><span id='version'>Loading U-Boot version...</span></a>
     </div>
   </aside>
@@ -547,6 +547,12 @@ function setBoard(name){
   var brand=document.getElementById('brand-model');
   if(brand)brand.textContent=BOARD;
 }
+/* Show the address the browser actually reached us on: the recovery server
+   may answer on the provisioned uenv address, not the built-in default. */
+(function(){
+  var el=document.getElementById('recovery-address');
+  if(el&&window.location.hostname)el.textContent=window.location.hostname;
+})();
 
 var profiles={
 	  firmware:{

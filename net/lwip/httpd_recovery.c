@@ -145,7 +145,14 @@ unsigned long airoha_recovery_get_lan_activity_ms(void)
 
 /* Delay before reboot after flashing completes, to let browser finish reads */
 #define REBOOT_DELAY_MS        3000
-#define RECOVERY_STATIC_IPADDR           "192.168.1.1"
+/*
+ * The stock/vendor XG2010G recovery server answers on 192.168.0.1 and hands
+ * out 192.168.0.2 to the PC, so first-time recovery must match that or the
+ * browser never reaches the flash page.  These are only defaults: an
+ * 'ipaddr' already present in the uenv partition wins, which keeps older
+ * provisioned units and the stock recovery address working unchanged.
+ */
+#define RECOVERY_STATIC_IPADDR           "192.168.0.1"
 #define RECOVERY_STATIC_NETMASK          "255.255.255.0"
 #define RECOVERY_STATIC_GATEWAY          "0.0.0.0"
 /* Web recovery is intentionally limited to the switch path serving 1G ports. */
@@ -153,7 +160,7 @@ unsigned long airoha_recovery_get_lan_activity_ms(void)
 #define RECOVERY_1G_ETH_ALIAS            "eth0"
 #define RECOVERY_1G_ETH_SEQ              0
 #define RECOVERY_ETHACT_SAVE_LEN         64
-#define RECOVERY_DHCP_BROADCAST_IPADDR   "192.168.1.255"
+#define RECOVERY_DHCP_BROADCAST_IPADDR   "192.168.0.255"
 #define RECOVERY_DHCP_CLIENT_HOST        2U
 #define RECOVERY_DHCP_LEASE_SECS         86400U
 #define RECOVERY_DHCP_MAX_MSG_LEN        1500
@@ -205,6 +212,7 @@ unsigned long airoha_recovery_get_lan_activity_ms(void)
 #define RECOVERY_UBI_WRITE_CHUNK (1024 * 1024U)
 #define RECOVERY_MTD0_PREFIX_ARM_NOP 0xe320f000U
 #define RECOVERY_MTD0_PREFIX_ZERO 0x00000000U
+#define RECOVERY_MTD0_PREFIX_ERASED 0xffffffffU
 #define RECOVERY_MTD0_FIP_OFFSET 0x800U
 #define RECOVERY_FIP_TOC_HEADER_NAME 0xaa640001U
 #define RECOVERY_FIP_TOC_HEADER_SIZE 0x10U
@@ -281,9 +289,17 @@ static void recovery_cancel_timeouts(void)
 
 static void recovery_prepare_static_network(void)
 {
-	env_set("ipaddr", RECOVERY_STATIC_IPADDR);
-	env_set("netmask", RECOVERY_STATIC_NETMASK);
-	env_set("gatewayip", RECOVERY_STATIC_GATEWAY);
+	const char *ipaddr = env_get("ipaddr");
+	const char *netmask = env_get("netmask");
+	const char *gatewayip = env_get("gatewayip");
+
+	/*
+	 * Respect an address the board (or a previous recovery run) already set;
+	 * only fall back to the built-in vendor-compatible default when unset.
+	 */
+	env_set("ipaddr", ipaddr ? ipaddr : RECOVERY_STATIC_IPADDR);
+	env_set("netmask", netmask ? netmask : RECOVERY_STATIC_NETMASK);
+	env_set("gatewayip", gatewayip ? gatewayip : RECOVERY_STATIC_GATEWAY);
 }
 
 static u32 recovery_le32_to_cpu(const void *p)
@@ -316,6 +332,30 @@ static bool recovery_region_is_zero(const u8 *p, size_t len)
 	return true;
 }
 
+static bool recovery_region_is_erased(const u8 *p, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		if (p[i] != 0xff)
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * Validate the 0x800 bytes that precede the FIP in a bootloader image.
+ *
+ * Accepted, in order of preference:
+ *   - the vendor prefix, identified by its ARM NOP sled at mtd0+0;
+ *   - an erased (0xFF) prefix, which is the layout the vendor's own TFTP
+ *     helper produces: `mw.b $loadaddr 0xff 0x20000` followed by
+ *     `mtd erase bl2 && mtd write bl2 $loadaddr 0 0x20000`.
+ *
+ * A *zero-filled* prefix is rejected.  It is neither the vendor prefix nor
+ * erased flash, and a board flashed with it does not boot from NAND.
+ */
 static int recovery_validate_mtd0_prefix(const u8 *p)
 {
 	u32 prefix_word = recovery_le32_to_cpu(p);
@@ -323,18 +363,26 @@ static int recovery_validate_mtd0_prefix(const u8 *p)
 	if (prefix_word == RECOVERY_MTD0_PREFIX_ARM_NOP)
 		return 0;
 
-	if (prefix_word == RECOVERY_MTD0_PREFIX_ZERO) {
-		if (recovery_region_is_zero(p, RECOVERY_MTD0_FIP_OFFSET))
+	if (prefix_word == RECOVERY_MTD0_PREFIX_ERASED) {
+		if (recovery_region_is_erased(p, RECOVERY_MTD0_FIP_OFFSET))
 			return 0;
+		printf("Invalid mtd0 bootloader image: prefix starts erased (0x%08x) "
+		       "but is not all 0xFF up to the FIP\n", prefix_word);
+		return -EINVAL;
+	}
 
-		printf("Invalid mtd0 bootloader image: prefix[0x0000..0x%04x] is not all zero\n",
-		       RECOVERY_MTD0_FIP_OFFSET - 1);
+	if (prefix_word == RECOVERY_MTD0_PREFIX_ZERO) {
+		printf("Invalid mtd0 bootloader image: prefix[0x0000]=0x%08x is zero-filled\n",
+		       prefix_word);
+		printf("Neither the vendor prefix (ARM NOP sled 0x%08x) nor erased "
+		       "flash (0xFFFFFFFF) is zero.\n", RECOVERY_MTD0_PREFIX_ARM_NOP);
+		printf("Rebuild with MTD0_PREFIX_MODE=stock (preferred) or =erased.\n");
 		return -EINVAL;
 	}
 
 	printf("Invalid mtd0 bootloader image: prefix[0x0000]=0x%08x\n",
 	       prefix_word);
-	printf("Expected full signed xg2010g-*-mtd0-signed.bin with stock or zero mtd0 prefix\n");
+	printf("Expected the vendor mtd0 prefix (NOP sled) or an erased 0xFF prefix\n");
 	return -EINVAL;
 }
 
@@ -1554,8 +1602,8 @@ static int recovery_dhcp_server_init(struct recovery_dhcp_server *srv,
 	network_addr = server_addr & netmask_addr;
 
 	/*
-	 * Offer 192.168.1.2 for the normal recovery /24 instead of relying on
-	 * PP_HTONL() for the host-number bit position.
+	 * Offer .2 in the recovery /24 instead of relying on PP_HTONL() for the
+	 * host-number bit position.
 	 */
 	recovery_dhcp_scalar_to_ip4(&srv->client_ip,
 				    network_addr | RECOVERY_DHCP_CLIENT_HOST);
@@ -2447,9 +2495,22 @@ static int recovery_erase_mtd_region(struct mtd_info *mtd, loff_t ofs,
 	return 0;
 }
 
+/*
+ * Write an image into a raw MTD region, block by block.
+ *
+ * @strict: the image's byte offsets are part of its on-flash layout, so the
+ *          payload must land at exactly `ofs + written`.  The BootROM and the
+ *          BL2 stage read the bootloader region linearly and do not skip bad
+ *          blocks, therefore skipping one here would shift every following
+ *          eraseblock by 0x20000 and silently produce an image that looks
+ *          valid at offset 0 but cannot boot.  In strict mode any bad block or
+ *          short write is fatal.  Non-strict callers (nothing depends on the
+ *          byte offsets) keep the resilient skip behaviour.
+ */
 static int recovery_write_mtd_region(struct mtd_info *mtd, loff_t ofs,
 				     size_t region_len, const void *image,
 				     size_t image_size, bool verify,
+				     bool strict,
 				     struct recovery_status_led_ctrl *status_leds)
 {
 	const u8 *src = image;
@@ -2485,6 +2546,14 @@ static int recovery_write_mtd_region(struct mtd_info *mtd, loff_t ofs,
 		if (ret > 0) {
 			printf("Skipping bad block at 0x%llx\n",
 			       (unsigned long long)addr);
+			if (strict) {
+				printf("Refusing to write '%s': a bad block inside the "
+				       "raw bootloader region would shift the payload by "
+				       "0x%x bytes and the bootloader would not boot\n",
+				       mtd->name, mtd->erasesize);
+				ret = -EIO;
+				goto out;
+			}
 			recovery_service_runtime(status_leds);
 			continue;
 		}
@@ -2494,6 +2563,11 @@ static int recovery_write_mtd_region(struct mtd_info *mtd, loff_t ofs,
 			printf("mtd_write failed: ret=%d retlen=%lu at 0x%llx\n",
 			       ret, (unsigned long)retlen,
 			       (unsigned long long)addr);
+			if (strict) {
+				if (!ret)
+					ret = -EIO;
+				goto out;
+			}
 			if (recovery_mtd_mark_bad(mtd, addr)) {
 				if (!ret)
 					ret = -EIO;
@@ -2508,6 +2582,8 @@ static int recovery_write_mtd_region(struct mtd_info *mtd, loff_t ofs,
 							src + written, chunk,
 							verify_buf);
 			if (ret) {
+				if (strict)
+					goto out;
 				if (recovery_mtd_mark_bad(mtd, addr))
 					goto out;
 				recovery_service_runtime(status_leds);
@@ -3949,6 +4025,11 @@ printf("Failed to select UBI %s rebuild target: %d\n",
 		ret = recovery_write_mtd_region(mtd, ofs, target.limit, image,
 						image_size,
 						exact != 0,
+						/* strict layout: the 2 MiB mtd0
+						 * image is read linearly by the
+						 * BootROM/BL2, so a skipped bad
+						 * block must not shift it. */
+						current_target == TARGET_UBOOT,
 						status_leds);
 		if (ret) {
 			printf("mtd_write failed: %d\n", ret);
@@ -4032,7 +4113,7 @@ static void recovery_restore_ethact(const struct recovery_ethact_save *save)
 
 /*
  * Bring up only the switch path serving the 1G recovery port. Earlier
- * multi-port recovery used one 192.168.1.1 netif per Ethernet device, which
+ * multi-port recovery used one recovery-address netif per Ethernet device, which
  * made DHCP/TCP routing fragile when multiple PHY/XSI ports were active at
  * the same time.
  */

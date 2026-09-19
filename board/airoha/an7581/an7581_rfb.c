@@ -1013,7 +1013,7 @@ int board_late_init(void)
 	       xr1710g_is_compatible() ? "Brightspeed Gemtek XR1710G"
 				       : "Brightspeed Gemtek XG2010G",
 	       XG2010G_RELEASE_VERSION, XG2010G_RELEASE_CREDIT);
-	printf("HTTP recovery: type 'http_recovery', then open http://192.168.1.1/ in incognito mode (PC 192.168.1.2/24)\n");
+	printf("HTTP recovery: type 'http_recovery', then open http://192.168.0.1/ in incognito mode (PC 192.168.0.2/24)\n");
 
 	/* Read only the one-shot mtd1/uenv flag; never save mtd0 env. */
 	if (xg2010g_is_compatible()) {
@@ -1083,11 +1083,21 @@ int board_late_init(void)
 		return 0;
 	}
 
-	env_set("ipaddr", "192.168.1.1");
-	env_set("netmask", "255.255.255.0");
-	env_set("gatewayip", "0.0.0.0");
-	printf("%s recovery network: eth0/gdm1 1G switch port only\n",
-	       xr1710g_is_compatible() ? "XR1710G" : "XG2010G");
+	/*
+	 * Match the stock recovery subnet (192.168.0.1) so a first-time flash
+	 * works with the address printed in the vendor flashing guide, but do not
+	 * clobber an address the uenv partition already carries: units flashed
+	 * with an older build keep answering on their provisioned address.
+	 */
+	if (!env_get("ipaddr"))
+		env_set("ipaddr", "192.168.0.1");
+	if (!env_get("netmask"))
+		env_set("netmask", "255.255.255.0");
+	if (!env_get("gatewayip"))
+		env_set("gatewayip", "0.0.0.0");
+	printf("%s recovery network: eth0/gdm1 1G switch port only, http://%s/\n",
+	       xr1710g_is_compatible() ? "XR1710G" : "XG2010G",
+	       env_get("ipaddr"));
 
 	/*
 	 * Keep the recovery upload buffer well away from the low-memory

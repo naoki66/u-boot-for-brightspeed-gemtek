@@ -28,8 +28,14 @@ def main() -> int:
     parser.add_argument(
         "--prefix-mode",
         default=os.environ.get("MTD0_PREFIX_MODE", "stock"),
-        choices=("stock", "zero"),
-        help="prefix source before the FIP: stock file or zero-filled bytes",
+        choices=("stock", "erased"),
+        help=(
+            "prefix before the FIP: 'stock' copies the vendor mtd0 prefix, "
+            "'erased' fills it with 0xFF (erased-flash value, which is what the "
+            "vendor bootloader uses). A zero-filled prefix is NOT valid: it is "
+            "neither the vendor prefix nor erased flash and the board will not "
+            "boot from NAND."
+        ),
     )
     parser.add_argument(
         "--fip",
@@ -58,8 +64,13 @@ def main() -> int:
     mtd0_size = int(args.mtd0_size, 0)
     fip_offset = int(args.fip_offset, 0)
 
-    if args.prefix_mode == "zero":
-        prefix = b"\0" * fip_offset
+    if args.prefix_mode == "erased":
+        # 0xFF is what an erased NAND block reads as.  The vendor's own
+        # TFTP helper writes the preloader FIP into an erased 2 MiB region
+        # (`mw.b $loadaddr 0xff 0x20000`), so an erased prefix is a tested
+        # layout.  0x00 is not: it is neither the vendor prefix nor erased
+        # flash, and the BootROM will not boot that image.
+        prefix = b"\xff" * fip_offset
     else:
         prefix = args.prefix.read_bytes() if fip_offset else b""
     fip = args.fip.read_bytes()
@@ -68,6 +79,12 @@ def main() -> int:
         raise SystemExit(
             f"prefix size {len(prefix)} != FIP offset {fip_offset}"
         )
+    if fip_offset and args.prefix_mode == "stock":
+        if prefix[:4] == b"\x00\x00\x00\x00":
+            raise SystemExit(
+                "stock prefix starts with 0x00000000; expected the ARM NOP "
+                "sled (0xe320f000). Use --prefix-mode erased instead."
+            )
     if fip_offset + len(fip) > mtd0_size:
         raise SystemExit(
             f"signed FIP exceeds mtd0: "
