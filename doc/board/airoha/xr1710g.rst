@@ -127,6 +127,10 @@ X 模式救砖与 Web Recovery
   switch CPU 口提供的 1G 网口。FE MDIO 上的 phy5/phy8 USXGMII 口不在
   U-Boot recovery DTS 中启用，避免多 MAC 随机地址和多个 ``192.168.0.1``
   netif 同时收发导致 TCP 冲突。
+* **串口 TFTP 救砖**：与 XG2010G 共用 ``board/airoha/an7581/xg2010g-tftp.env``
+  （通过 ``xr1710g.env`` 里的 ``#include`` 引入），助手和启动菜单完全一致，
+  见 :doc:`xg2010g` 的“串口 TFTP 救砖与启动菜单”。它只引用两板共有的分区标签
+  （``bootloader`` / ``uenv`` / ``dsd`` / ``ubi``）。
 * **状态灯**：恢复页运行期间 sts 红/绿/蓝/白做呼吸跑马灯，使用 GPIO
   29/17/19/20（低有效）。启动日志应出现 ``Recovery status LEDs:
   gpio29(L) gpio17(L) gpio19(L) gpio20(L)``。若某盏灯明暗相反，把

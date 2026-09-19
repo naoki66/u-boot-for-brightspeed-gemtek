@@ -2384,10 +2384,20 @@ static int recovery_mtd_mark_bad(struct mtd_info *mtd, loff_t addr)
 	return ret;
 }
 
+/*
+ * Read the just-written region back and compare it with the source.
+ *
+ * Borrowed from the vendor U-Boot, whose UBI writes are always followed by
+ * `cmp.b $loadaddr $verifyaddr $filesize` (see ubi_verify_fip /
+ * ubi_verify_production in its default environment).  Without a read-back, a
+ * NAND programming failure or a bad block silently produces an image that
+ * looks written but cannot boot.
+ */
 static int recovery_mtd_verify_write(struct mtd_info *mtd, loff_t addr,
 				     const u8 *src, size_t len, u8 *buf)
 {
 	size_t retlen = 0;
+	size_t i;
 	int ret;
 
 	ret = mtd_read(mtd, addr, len, &retlen, buf);
@@ -2398,8 +2408,14 @@ static int recovery_mtd_verify_write(struct mtd_info *mtd, loff_t addr,
 	}
 
 	if (memcmp(buf, src, len)) {
-		printf("mtd_read verify mismatch at 0x%llx\n",
-		       (unsigned long long)addr);
+		/* Report the first differing byte: it localises the fault. */
+		for (i = 0; i < len; i++) {
+			if (buf[i] != src[i])
+				break;
+		}
+		printf("Read-back mismatch at 0x%llx (offset 0x%zx): "
+		       "wrote 0x%02x, read 0x%02x\n",
+		       (unsigned long long)addr, i, src[i], buf[i]);
 		return -EIO;
 	}
 
@@ -4001,6 +4017,20 @@ printf("Failed to select UBI %s rebuild target: %d\n",
 		struct mtd_info *mtd = target.mtd;
 		loff_t ofs = target.ofs;
 		loff_t erase_len = target.limit;
+		/*
+		 * Read the data back and compare it whenever this target is a
+		 * critical raw partition whose byte offsets are part of its
+		 * layout (bootloader / uenv / dsd, 2 MiB each).  A NAND write
+		 * that is not verified looks successful while producing an
+		 * image that cannot boot, which is exactly how the unbootable
+		 * mtd0 images got shipped.  The UBI firmware path is left
+		 * alone: UBI maintains its own erase counters and CRC per PEB,
+		 * so re-reading hundreds of megabytes would only double the
+		 * flash time without adding a check.
+		 */
+		bool verify = current_target == TARGET_UBOOT ||
+			      current_target == TARGET_UENV ||
+			      current_target == TARGET_DSD;
 
 		prog_phase = 1;
 		prog_done = 0;
@@ -4024,7 +4054,7 @@ printf("Failed to select UBI %s rebuild target: %d\n",
 		prog_phase = 2;
 		ret = recovery_write_mtd_region(mtd, ofs, target.limit, image,
 						image_size,
-						exact != 0,
+						verify,
 						/* strict layout: the 2 MiB mtd0
 						 * image is read linearly by the
 						 * BootROM/BL2, so a skipped bad
@@ -4037,6 +4067,10 @@ printf("Failed to select UBI %s rebuild target: %d\n",
 			prog_phase = -1;
 			return ret;
 		}
+		if (verify)
+			printf("Verified %u bytes written to '%s' at 0x%llx\n",
+			       image_size, target.name,
+			       (unsigned long long)ofs);
 	}
 
 	recovery_release_target(&target);

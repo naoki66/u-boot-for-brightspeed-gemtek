@@ -592,6 +592,93 @@ U-Boot 自带的 TFTP 刷写助手说明了它到底是什么：
      - ``0x18cdb8``
      - ``0xFF`` 填充到 2 MiB
 
+串口 TFTP 救砖与启动菜单
+------------------------
+
+X 模式依赖 BootROM 和串口，Web Recovery 依赖 U-Boot 的 lwIP 网络栈。两者都可能
+不可用（网口没起来、镜像已经不能启动、恢复页挂了）。因此在 U-Boot 里再提供一条
+**纯串口 + TFTP** 的写入通道，设计抄自原厂 U-Boot 的
+``boot_tftp_write_bl2`` / ``mtd_write_bl2`` 助手和它的启动菜单。
+
+默认环境变量（``board/airoha/an7581/xg2010g.env`` 与共用的
+``xg2010g-tftp.env``）：:
+
+    ipaddr=192.168.0.1      netmask=255.255.255.0      serverip=192.168.0.254
+    tftpboot_addr=0x90000000        # 暂存区，刻意不用 $loadaddr
+    tftpverify_addr=0x94000000      # 读回比对区
+    tftpboot_size=0x200000          # 完整 mtd0 镜像长度
+    tftpboot_bl2_size=0x20000       # preloader 写入的擦除区长度
+
+``tftpboot_addr`` 与 ``$loadaddr`` 分开是有意为之：Web Recovery 的上传缓冲在
+``recovery_addr``（``0x81800000``），分开可以避免 TFTP 传输和正在进行的 HTTP
+上传互相踩内存。
+
+用法（所有助手都不会自动执行，只在手动或菜单里触发）：:
+
+    setenv serverip 192.168.0.254
+    setenv tftpboot_file xg2010g-2026-9-16-xxxxxxxxxxxx-mtd0-signed.bin
+    run net_init
+    run tftp_flash                 # 完整 mtd0 镜像 -> bootloader 分区
+
+其余助手：
+
+.. list-table::
+   :header-rows: 1
+   :widths: 26 74
+
+   * - 变量
+     - 作用
+   * - ``run tftp_flash``
+     - 写完整 2 MiB ``mtd0`` 到 ``bootloader`` 分区（自带 0x800 前导区）
+   * - ``run tftp_flash_bl2``
+     - 写 ``preloader.bin`` 这类自带 0x800 前导区的镜像。先用 ``iret`` 把
+       ``0x20000`` 暂存区填 ``0xFF``，把文件放到 ``+0x800``，再整块写入
+       —— 与原厂 ``mw.b $loadaddr 0xff 0x20000`` 完全一致
+   * - ``run tftp_flash_fit``
+     - 把系统固件写进 UBI 的 ``fit`` 卷
+   * - ``run tftp_flash_uenv`` / ``run tftp_flash_dsd``
+     - 恢复 2 MiB 的 ``uenv`` / ``dsd`` 出厂校准分区
+   * - ``run tftp_flash_manual``
+     - **手动指定写入地址**：写 ``${tftpboot_file}`` 到 ``${tftpboot_part}`` 的
+       偏移 ``${tftpboot_ofs}``，长度 ``${tftpboot_len}``
+
+手动模式示例（修一个固定助手覆盖不到的布局）：:
+
+    setenv tftpboot_file my-image.bin
+    setenv tftpboot_part bootloader
+    setenv tftpboot_ofs  0x800
+    setenv tftpboot_len  0x200000
+    run tftp_flash_manual
+
+手动模式**不做任何目标合法性检查**，这是它的用途，也是它的风险：写错区域可能
+覆盖校准数据。先用 ``mtd list`` 和
+``mtd read <part> ${tftpverify_addr} 0 0x100`` 确认目标，并先备份
+（Web Recovery 的“备份”页可以下载 ``uenv`` / ``dsd``）。
+
+每个助手在**写完都会读回比对**：``mtd read``（或 ``ubi read``）到
+``${tftpverify_addr}`` 后 ``cmp.b`` 源缓冲，一致才打印
+``... written and read-back verified.``，否则打印 ``FAILED`` 并保留已写内容不做
+其它动作。这一步不能省：NAND 写入失败或碰到坏块时，不读回就"看起来成功"，而
+镜像其实不能启动。
+
+启动菜单（``run boot_menu``，或直接在 U-Boot 提示符敲 ``bootmenu``）：
+
+.. code-block:: text
+
+   0  Boot system                     run boot_ubi
+   1  Web recovery                    run http_recovery
+   2  Flash mtd0 image via TFTP
+   3  Flash BL2/preloader via TFTP
+   4  Flash system firmware via TFTP
+   5  Manual NAND write via TFTP
+   6  Show storage information        mtd list / ubi info l
+   7  Show flash environment          printenv 相关变量
+   8  Reboot                           reset
+
+菜单是**可选**的：默认 ``bootcmd`` 仍是 ``run boot_ubi || http_recovery``，
+所以无人值守开机时系统照常启动、启动失败照常落到 Web Recovery。菜单只是让这些
+助手在没有网页面时也能用上。
+
 X 模式救砖
 ----------
 

@@ -86,3 +86,8 @@ CONFIG_DM_SPI=y
 CONFIG_LZMA_SIZE_OPTIMIZATION=y
 CONFIG_AIROHA_SNFI_SPI=y
 CONFIG_SHA512=y
+# Needed by the TFTP rescue helpers in the default environment: 'mw.b' zeroes
+# the 2 MiB staging buffer, 'itest.l' guards the image size, and 'cmp.b'
+# verifies the image read back out of NAND after writing.
+CONFIG_CMD_MEMORY=y
+CONFIG_CMD_ITEST=y

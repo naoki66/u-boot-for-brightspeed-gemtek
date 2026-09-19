@@ -188,6 +188,45 @@ X 模式加载临时引导。
 
 <p align="right"><a href="#top"><b>↑ 返回顶部</b></a></p>
 
+## 🧯 串口 TFTP 救砖与启动菜单
+
+Web Recovery 依赖 U-Boot 的 lwIP 网络栈；如果网口起不来、或恢复页挂了，U-Boot
+里还有一条**纯串口 + TFTP** 的写入通道（设计抄自原厂 U-Boot 的
+`boot_tftp_write_bl2` / `mtd_write_bl2` 助手）。设备能进 U-Boot 提示符就能用。
+
+```console
+setenv serverip 192.168.0.254
+setenv tftpboot_file xg2010g-...-mtd0-signed.bin
+run net_init
+run tftp_flash          # 完整 2 MiB mtd0 -> bootloader 分区
+```
+
+| 助手 | 作用 |
+| --- | --- |
+| `run tftp_flash` | 写完整 2 MiB `mtd0` 到 `bootloader` 分区 |
+| `run tftp_flash_bl2` | 写 `preloader.bin` 这类自带 0x800 前导区的镜像（暂存区先填 0xFF，文件放 `+0x800`，同原厂做法） |
+| `run tftp_flash_fit` | 把系统固件写进 UBI 的 `fit` 卷 |
+| `run tftp_flash_uenv` / `run tftp_flash_dsd` | 恢复 2 MiB 出厂校准分区 |
+| `run tftp_flash_manual` | **手动指定地址**：写 `${tftpboot_file}` 到 `${tftpboot_part}` 偏移 `${tftpboot_ofs}`、长度 `${tftpboot_len}` |
+
+**每个助手写完都会读回比对**（`mtd read` + `cmp.b`），一致才报
+`written and read-back verified.`，不一致直接报 `FAILED`。这一步不能省：NAND
+写入失败或碰到坏块时，不读回就"看起来成功"，而镜像其实不能启动。
+
+`run boot_menu` 打开启动菜单（Boot system / Web recovery / 三条 TFTP 刷写 /
+手动写入 / 存储信息 / 环境变量 / 重启）。默认 `bootcmd` **不变**，仍是
+`run boot_ubi || http_recovery`，所以无人值守开机照常启动、失败照常落到 Web
+Recovery；菜单只是让这些助手随时可用。
+
+`tftpboot_addr`（`0x90000000`）刻意与 `$loadaddr`（`0x81800000`）分开，避免
+TFTP 传输和 Web Recovery 的上传缓冲互相踩内存。
+
+> [!WARNING]
+> `tftp_flash_manual` 不做任何目标合法性检查——这是它的用途也是它的风险。
+> 写错区域可能覆盖 `factory` / `dsd` 校准数据，先用 `mtd list` 确认，并先备份。
+
+<p align="right"><a href="#top"><b>↑ 返回顶部</b></a></p>
+
 ## 📂 Release 文件名规范
 
 所有产物文件名遵循 `<board>-YYYY-M-D-<commit>-<suffix>` 规范：
