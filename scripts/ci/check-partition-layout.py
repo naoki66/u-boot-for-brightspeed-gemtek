@@ -1,0 +1,754 @@
+"""Cross-source consistency check for the AN7581 NAND partition layout.
+
+Why this exists
+---------------
+
+The partition layout of these boards is written down in *four* independent
+places, and nothing used to tie them together:
+
+  1. ``arch/arm/dts/<board>.dts`` -- ``fixed-partitions``. This is the only
+     table U-Boot itself reads, so it is the anchor for every check below.
+  2. ``board/airoha/an7581/an7581_rfb.c`` -- the ``XG2010G_UBI_*`` constants
+     that ``recovery_board_ops`` publishes. The web recovery server *refuses*
+     to touch a ``ubi`` MTD whose geometry does not match them, so a drift
+     here is a silent on-device failure with no build-time signal.
+  3. ``board/airoha/an7581/<board>.env`` plus ``include/env/airoha/an7581-tftp.env``
+     -- the TFTP rescue helpers assert an exact image size before erasing
+     (``itest.l ${filesize} -eq 0x200000``). If a partition is resized and the
+     assertion is not, the helper fails closed but with a misleading message.
+  4. ``.github/workflows/build-mtd0.yml`` -- the composed mtd0 image geometry
+     (``DEFAULT_MTD0_SIZE``, ``DEFAULT_FIP_OFFSET``, ``BL23_FIP_MAX_SIZE``).
+
+The boot chain adds a fifth, harder constraint that lives in the pinned TF-A
+tree, not in this repository:
+
+  * BL23 reads the second-stage FIP from ``PLAT_ECNT_FIP_OFFSET`` in mtd0 into
+    RAM at ``PLAT_ECNT_FIP_BASE`` and never reads more than
+    ``PLAT_ECNT_FIP_MAX_SIZE`` bytes. So the ``bootloader`` partition must be
+    at least ``PLAT_ECNT_FIP_OFFSET + PLAT_ECNT_FIP_MAX_SIZE`` long, or the
+    FIP runs off the end of its own partition.
+  * BL23 *can* be built to load the FIP from a UBI volume instead
+    (``fip_ubi_policy``, volume name hard-coded to ``fip``). That path locates
+    the UBI partition at ``UBI_START_ADDR``, which defaults to ``0x20000`` --
+    incompatible with this repository's layout, where ``ubi`` starts at
+    ``0x600000``. ``board/airoha/xg2010g/atf/build-atf.sh`` opts out of it by
+    defining ``ECNT_NAND_FIP_IN_BOOT_PARTITION``. Check ``ubi-start-vs-atf``
+    below makes that opt-out load-bearing: flipping it back without moving
+    ``ubi`` is caught here instead of on a bricked board.
+
+Note what is deliberately *not* checked: the ``flash_table.bin`` that
+``spi_nand_flash_table.c`` emits is a NAND *device* table (manufacturer/device
+id, page/erase/OOB geometry), not a partition table, and BL2 carries no copy of
+this repository's partition names. The two are related only through the chip
+geometry, which check ``ubi-geometry`` covers.
+
+Run from the repo root, once per board:
+
+    python3 scripts/ci/check-partition-layout.py --board xg2010g
+    python3 scripts/ci/check-partition-layout.py --board xg2010g \\
+        --atf-dir trusted-firmware-a-build --require-atf
+
+Exits 0 when every check passes, 1 (with a clear message) otherwise.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent.parent
+BOARD_SRC = REPO / "board" / "airoha" / "an7581" / "an7581_rfb.c"
+ATF_BUILD = REPO / "board" / "airoha" / "xg2010g" / "atf" / "build-atf.sh"
+TFTP_ENV = REPO / "include" / "env" / "airoha" / "an7581-tftp.env"
+WORKFLOW = REPO / ".github" / "workflows" / "build-mtd0.yml"
+
+# The boards this repository ships. Both reuse one board source file, so the
+# board-side geometry is shared and only the DTS/env/defconfig differ.
+BOARDS = ("xg2010g", "xr1710g")
+
+# W25N04K geometry, as measured on the target (doc/board/airoha/xg2010g.rst:
+# "512 MiB W25N04K, erase block 128 KiB, page 2 KiB, OOB 128 bytes").
+CHIP_SIZE = 0x20000000
+CHIP_ERASE_SIZE = 0x20000
+CHIP_WRITE_SIZE = 0x800
+CHIP_OOB_SIZE = 0x80
+
+REQUIRED_LABELS = ("bootloader", "uenv", "dsd", "ubi", "reserved_bmt")
+
+# Where the shared env file and the board env file are expected to agree: the
+# helper name whose literal size assertion must equal the partition it writes.
+TFTP_ENV_SIZE_RULES = {
+    "tftp_flash_uenv": "uenv",
+    "tftp_flash_dsd": "dsd",
+    "tftp_flash_bl2": None,  # BL2 asserts 0x1f800, a length, not a partition
+}
+
+
+@dataclass
+class Part:
+    label: str
+    start: int
+    size: int
+    read_only: bool
+    node: str
+
+    @property
+    def end(self) -> int:
+        return self.start + self.size
+
+
+@dataclass
+class CheckResult:
+    failures: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    def fail(self, check: str, msg: str) -> None:
+        self.failures.append(f"[{check}] {msg}")
+
+    def note(self, msg: str) -> None:
+        self.notes.append(msg)
+
+    @property
+    def ok(self) -> bool:
+        return not self.failures
+
+
+def strip_c_comments(text: str) -> str:
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    text = re.sub(r"//[^\n]*", "", text)
+    return text
+
+
+def parse_int(text: str) -> int:
+    """Accept 0x... / decimal, tolerating C spellings.
+
+    Real inputs include ``(0x800)``, ``UL(0x100000)`` and
+    ``0x1b800000ULL``, so unwrap macros and expressions before converting.
+    """
+    text = text.strip()
+    text = re.sub(r"\s*(//.*|/\*.*)$", "", text).strip()
+    text = re.sub(r"(ULL|UL|U|L|ll|ul|u|llu|LLU)$", "", text.strip())
+    # Unwrap one macro call or parenthesised expression, then retry.
+    m = re.match(r"^([A-Za-z_]\w*)?\s*\((?P<inner>.*)\)$", text.strip(), re.DOTALL)
+    if m:
+        return parse_int(m.group("inner"))
+    return int(text, 0)
+
+
+# ---------------------------------------------------------------------------
+# 1. DTS fixed-partitions -- the anchor table
+# ---------------------------------------------------------------------------
+
+
+def parse_dts_partitions(path: Path, result: CheckResult) -> list[Part]:
+    text = strip_c_comments(path.read_text(encoding="utf-8"))
+    block = re.search(
+        r"partitions\s*\{(?P<body>.*?)\n\t\};", text, re.DOTALL
+    )
+    if not block:
+        result.fail("dts", f"{path}: fixed-partitions block not found")
+        return []
+
+    parts: list[Part] = []
+    for node in re.finditer(
+        r"(?P<node>[\w-]+@[0-9a-fA-F]+)\s*\{(?P<body>[^}]*)\}", block.group("body")
+    ):
+        body = node.group("body")
+        label = re.search(r'label\s*=\s*"([^"]+)"', body)
+        reg = re.search(r"reg\s*=\s*<\s*([^>]+)>", body)
+        if not label or not reg:
+            result.fail(
+                "dts",
+                f"{path}: partition {node.group('node')} lacks label or reg",
+            )
+            continue
+        cells = reg.group(1).split()
+        if len(cells) != 2:
+            result.fail(
+                "dts",
+                f"{path}: partition {label.group(1)} reg must have 2 cells, "
+                f"got {len(cells)}",
+            )
+            continue
+        parts.append(
+            Part(
+                label=label.group(1),
+                start=parse_int(cells[0]),
+                size=parse_int(cells[1]),
+                read_only="read-only" in body,
+                node=node.group("node"),
+            )
+        )
+    if not parts:
+        result.fail("dts", f"{path}: no partitions parsed")
+    return parts
+
+
+def check_partition_table(result: CheckResult, dts_path: Path, parts: list[Part]) -> None:
+    if not parts:
+        return
+
+    found = [p.label for p in parts]
+    missing = [lbl for lbl in REQUIRED_LABELS if lbl not in found]
+    if missing:
+        result.fail(
+            "dts-table",
+            f"{dts_path.name}: missing required partitions: {', '.join(missing)}",
+        )
+    extra = [lbl for lbl in found if lbl not in REQUIRED_LABELS]
+    if extra:
+        result.note(f"{dts_path.name}: unexpected partitions: {', '.join(extra)}")
+
+    if parts[0].start != 0:
+        result.fail(
+            "dts-table",
+            f"{dts_path.name}: first partition starts at 0x{parts[0].start:x}, "
+            f"must start at 0x0",
+        )
+
+    for prev, cur in zip(parts, parts[1:]):
+        if cur.start < prev.end:
+            result.fail(
+                "dts-table",
+                f"{dts_path.name}: {cur.label}@0x{cur.start:x} overlaps "
+                f"{prev.label} (ends 0x{prev.end:x})",
+            )
+        elif cur.start > prev.end:
+            result.fail(
+                "dts-table",
+                f"{dts_path.name}: gap of 0x{cur.start - prev.end:x} bytes "
+                f"between {prev.label} and {cur.label}",
+            )
+
+    total = parts[-1].end
+    if total != CHIP_SIZE:
+        result.fail(
+            "dts-table",
+            f"{dts_path.name}: partitions end at 0x{total:x}, chip is "
+            f"0x{CHIP_SIZE:x}",
+        )
+
+    last = parts[-1]
+    if last.label == "reserved_bmt" and not last.read_only:
+        result.fail(
+            "dts-table",
+            f"{dts_path.name}: reserved_bmt must be read-only (it holds the "
+            f"bad-block table and must never be written by OpenWrt)",
+        )
+
+
+def part_by_label(parts: list[Part], label: str) -> Part | None:
+    for p in parts:
+        if p.label == label:
+            return p
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 2. Board-side geometry (board/airoha/an7581/an7581_rfb.c)
+# ---------------------------------------------------------------------------
+
+
+def parse_board_geometry(path: Path, result: CheckResult) -> dict[str, object]:
+    text = strip_c_comments(path.read_text(encoding="utf-8"))
+
+    def macro(name: str) -> str | None:
+        m = re.search(rf"#define\s+{name}\s+(?P<val>[^\n]+)", text)
+        return m.group("val").strip() if m else None
+
+    out: dict[str, object] = {}
+    int_macros = {
+        "ubi_size": "XG2010G_UBI_SIZE",
+        "ubi_erase": "XG2010G_UBI_ERASE_SIZE",
+        "ubi_write": "XG2010G_UBI_WRITE_SIZE",
+        "ubi_oob": "XG2010G_UBI_OOB_SIZE",
+        "uenv_payload": "XG2010G_UENV_SIZE",
+        "uenv_erase": "XG2010G_UENV_ERASE_SIZE",
+    }
+    for key, name in int_macros.items():
+        raw = macro(name)
+        if raw is None:
+            result.fail("board", f"{path.name}: #define {name} not found")
+            continue
+        try:
+            out[key] = parse_int(raw)
+        except ValueError:
+            result.fail("board", f"{path.name}: cannot parse {name} = {raw!r}")
+
+    for key, name in (
+        ("ubi_part", "XG2010G_UBI_PART"),
+        ("uenv_part", "XG2010G_UENV_PART"),
+        ("dsd_part", "XG2010G_DSD_PART"),
+    ):
+        raw = macro(name)
+        if raw is None:
+            result.fail("board", f"{path.name}: #define {name} not found")
+            continue
+        out[key] = raw.strip().strip('"')
+    return out
+
+
+def check_board_geometry(
+    result: CheckResult, board: dict[str, object], parts: list[Part]
+) -> None:
+    if not board or not parts:
+        return
+
+    if board.get("ubi_erase") != CHIP_ERASE_SIZE:
+        result.fail(
+            "ubi-geometry",
+            f"XG2010G_UBI_ERASE_SIZE = 0x{board.get('ubi_erase', 0):x}, "
+            f"chip erase block is 0x{CHIP_ERASE_SIZE:x}",
+        )
+    if board.get("ubi_write") != CHIP_WRITE_SIZE:
+        result.fail(
+            "ubi-geometry",
+            f"XG2010G_UBI_WRITE_SIZE = 0x{board.get('ubi_write', 0):x}, "
+            f"chip page size is 0x{CHIP_WRITE_SIZE:x}",
+        )
+    if board.get("ubi_oob") != CHIP_OOB_SIZE:
+        result.fail(
+            "ubi-geometry",
+            f"XG2010G_UBI_OOB_SIZE = 0x{board.get('ubi_oob', 0):x}, "
+            f"chip OOB is 0x{CHIP_OOB_SIZE:x}",
+        )
+
+    ubi = part_by_label(parts, "ubi")
+    if ubi is None:
+        return
+    if board.get("ubi_part") != ubi.label:
+        result.fail(
+            "board-vs-dts",
+            f"XG2010G_UBI_PART = {board.get('ubi_part')!r} but the DTS labels "
+            f"the UBI partition {ubi.label!r}",
+        )
+    if board.get("ubi_size") != ubi.size:
+        result.fail(
+            "board-vs-dts",
+            f"XG2010G_UBI_SIZE = 0x{board.get('ubi_size', 0):x} but the DTS "
+            f"ubi partition is 0x{ubi.size:x} -- recovery_board_ops.mtd_ubi_valid() "
+            f"would reject the real MTD at runtime",
+        )
+
+    uenv = part_by_label(parts, "uenv")
+    if uenv is not None:
+        if board.get("uenv_part") != uenv.label:
+            result.fail(
+                "board-vs-dts",
+                f"XG2010G_UENV_PART = {board.get('uenv_part')!r} but the DTS "
+                f"labels it {uenv.label!r}",
+            )
+        if uenv.size < int(board.get("uenv_erase", 0)):
+            result.fail(
+                "board-vs-dts",
+                f"uenv partition is 0x{uenv.size:x} but "
+                f"XG2010G_UENV_ERASE_SIZE is 0x{int(board.get('uenv_erase', 0)):x}",
+            )
+
+    dsd = part_by_label(parts, "dsd")
+    if dsd is not None and board.get("dsd_part") != dsd.label:
+        result.fail(
+            "board-vs-dts",
+            f"XG2010G_DSD_PART = {board.get('dsd_part')!r} but the DTS labels "
+            f"it {dsd.label!r}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# 3. Environment helpers
+# ---------------------------------------------------------------------------
+
+
+def parse_board_env(path: Path, result: CheckResult) -> dict[str, int]:
+    if not path.exists():
+        result.fail("env", f"{path}: board environment file not found")
+        return {}
+    text = path.read_text(encoding="utf-8")
+    out: dict[str, int] = {}
+    for key in ("tftpboot_size", "tftpboot_bl2_size", "recovery_size_uboot"):
+        m = re.search(rf"^{key}\s*=\s*(?P<val>[0-9a-fA-Fx]+)\s*$", text, re.MULTILINE)
+        if not m:
+            result.fail("env", f"{path.name}: {key} not found")
+            continue
+        out[key] = parse_int(m.group("val"))
+    return out
+
+
+def parse_tftp_env_sizes(path: Path, result: CheckResult) -> dict[str, int]:
+    """Extract the literal size each tftp_flash_* helper asserts before erasing."""
+    if not path.exists():
+        result.fail("env", f"{path}: shared tftp environment not found")
+        return {}
+    text = path.read_text(encoding="utf-8")
+    out: dict[str, int] = {}
+    for helper in ("tftp_flash_uenv", "tftp_flash_dsd"):
+        # The helper reads "itest.l ${filesize} -eq 0x200000", so the closing
+        # brace of the variable reference has to be part of the pattern.
+        m = re.search(
+            rf"^{helper}=.*?filesize\}}\s+-eq\s+(?P<val>0x[0-9a-fA-F]+)",
+            text,
+            re.MULTILINE,
+        )
+        if not m:
+            result.fail(
+                "env",
+                f"{path.name}: {helper} no longer asserts an exact filesize",
+            )
+            continue
+        out[helper] = parse_int(m.group("val"))
+    return out
+
+
+def check_env(
+    result: CheckResult,
+    env: dict[str, int],
+    tftp: dict[str, int],
+    parts: list[Part],
+    defconfig: Path,
+) -> None:
+    if not parts:
+        return
+    bootloader = part_by_label(parts, "bootloader")
+    uenv = part_by_label(parts, "uenv")
+    dsd = part_by_label(parts, "dsd")
+
+    if bootloader and "tftpboot_size" in env:
+        if env["tftpboot_size"] != bootloader.size:
+            result.fail(
+                "env-vs-dts",
+                f"tftpboot_size = 0x{env['tftpboot_size']:x} but the bootloader "
+                f"partition is 0x{bootloader.size:x}; tftp_flash would refuse "
+                f"every correctly sized mtd0 image",
+            )
+    if bootloader and "recovery_size_uboot" in env:
+        if env["recovery_size_uboot"] != bootloader.size:
+            result.fail(
+                "env-vs-dts",
+                f"recovery_size_uboot = 0x{env['recovery_size_uboot']:x} but the "
+                f"bootloader partition is 0x{bootloader.size:x}",
+            )
+
+    for helper, label in TFTP_ENV_SIZE_RULES.items():
+        part = {"uenv": uenv, "dsd": dsd}.get(label) if label else None
+        if part is None or helper not in tftp:
+            continue
+        if tftp[helper] != part.size:
+            result.fail(
+                "env-vs-dts",
+                f"{helper} asserts filesize == 0x{tftp[helper]:x} but the "
+                f"{part.label} partition is 0x{part.size:x}",
+            )
+
+    if uenv is not None and defconfig.exists():
+        cfg = defconfig.read_text(encoding="utf-8")
+
+        def cfg_val(name: str) -> str | None:
+            m = re.search(rf"^{name}=(?P<val>[^\n]+)", cfg, re.MULTILINE)
+            return m.group("val").strip() if m else None
+
+        env_size = cfg_val("CONFIG_ENV_SIZE")
+        if env_size is None:
+            result.fail("env", f"{defconfig.name}: CONFIG_ENV_SIZE not set")
+        else:
+            size = parse_int(env_size)
+            if size > uenv.size:
+                result.fail(
+                    "env-vs-dts",
+                    f"CONFIG_ENV_SIZE = 0x{size:x} does not fit the uenv "
+                    f"partition (0x{uenv.size:x})",
+                )
+
+        env_dev = cfg_val("CONFIG_ENV_MTD_DEV")
+        if env_dev is not None:
+            dev = env_dev.strip().strip('"')
+            if dev != uenv.label:
+                result.fail(
+                    "env-vs-dts",
+                    f"CONFIG_ENV_MTD_DEV = {dev!r} but the DTS labels the "
+                    f"environment partition {uenv.label!r} -- saveenv would "
+                    f"target a non-existent MTD",
+                )
+        env_off = cfg_val("CONFIG_ENV_OFFSET")
+        if env_off is not None and parse_int(env_off) != 0:
+            result.note(
+                f"{defconfig.name}: CONFIG_ENV_OFFSET = 0x{parse_int(env_off):x}; "
+                f"the recovery uenv consumers assume the environment starts at "
+                f"the partition base"
+            )
+
+
+# ---------------------------------------------------------------------------
+# 4. Workflow geometry
+# ---------------------------------------------------------------------------
+
+
+def parse_workflow_env(path: Path, result: CheckResult) -> dict[str, int]:
+    if not path.exists():
+        result.fail("workflow", f"{path}: workflow not found")
+        return {}
+    text = path.read_text(encoding="utf-8")
+    wanted = (
+        "DEFAULT_MTD0_SIZE",
+        "DEFAULT_FIP_OFFSET",
+        "BL23_FIP_MAX_SIZE",
+        "BL2_XMODEM_MAX_SIZE",
+    )
+    out: dict[str, int] = {}
+    for key in wanted:
+        m = re.search(rf'^\s*{key}:\s*"(?P<val>[^"]+)"', text, re.MULTILINE)
+        if not m:
+            result.fail("workflow", f"{path.name}: {key} not found in env block")
+            continue
+        out[key] = parse_int(m.group("val"))
+    return out
+
+
+def check_workflow(
+    result: CheckResult, wf: dict[str, int], parts: list[Part]
+) -> None:
+    bootloader = part_by_label(parts, "bootloader")
+    if bootloader and "DEFAULT_MTD0_SIZE" in wf:
+        if wf["DEFAULT_MTD0_SIZE"] != bootloader.size:
+            result.fail(
+                "workflow-vs-dts",
+                f"DEFAULT_MTD0_SIZE = 0x{wf['DEFAULT_MTD0_SIZE']:x} but the "
+                f"bootloader partition is 0x{bootloader.size:x}; the composed "
+                f"mtd0 image would not exactly fill its partition",
+            )
+    if wf and "BL2_XMODEM_MAX_SIZE" in wf:
+        # The mtd_write_bl2 helper blanks 0x20000 bytes before the payload.
+        bl2_stage = 0x20000
+        if wf["BL2_XMODEM_MAX_SIZE"] >= bl2_stage:
+            result.fail(
+                "workflow",
+                f"BL2_XMODEM_MAX_SIZE = 0x{wf['BL2_XMODEM_MAX_SIZE']:x} does not "
+                f"leave room in the 0x{bl2_stage:x} BL2 staging window",
+            )
+
+
+# ---------------------------------------------------------------------------
+# 5. Pinned TF-A boot-chain constraints
+# ---------------------------------------------------------------------------
+
+
+def parse_atf(path: Path, result: CheckResult) -> dict[str, int]:
+    plat_def = path / "plat" / "ecnt" / "en7523" / "include" / "platform_def.h"
+    ubi_src = path / "plat" / "ecnt" / "en7523" / "bl2_boot_nand_ubi.c"
+    if not plat_def.exists():
+        result.fail("atf", f"{plat_def}: not found -- is --atf-dir a TF-A tree?")
+        return {}
+
+    text = strip_c_comments(plat_def.read_text(encoding="utf-8"))
+    out: dict[str, int] = {}
+
+    m = re.search(r"#define\s+PLAT_ECNT_FIP_OFFSET\s+(?P<val>[^\n]+)", text)
+    if not m:
+        result.fail("atf", f"{plat_def}: PLAT_ECNT_FIP_OFFSET not found")
+    else:
+        out["fip_offset"] = parse_int(m.group("val"))
+
+    # PLAT_ECNT_FIP_MAX_SIZE is defined several times behind #if branches; pick
+    # the one selected by TCSUPPORT_TCBOOT_1MB_SIZE, which build-atf.sh sets.
+    m = re.search(r"TCSUPPORT_TCBOOT_1MB_SIZE(?P<tail>.*?)#endif", text, re.DOTALL)
+    if m and (mm := re.search(r"#define\s+PLAT_ECNT_FIP_MAX_SIZE\s+(?P<val>[^\n]+)", m.group("tail"))):
+        out["fip_max_size"] = parse_int(mm.group("val"))
+    else:
+        result.note(
+            "could not resolve PLAT_ECNT_FIP_MAX_SIZE for "
+            "TCSUPPORT_TCBOOT_1MB_SIZE; skipping the window check"
+        )
+
+    if ubi_src.exists():
+        ubi_text = strip_c_comments(ubi_src.read_text(encoding="utf-8"))
+        m = re.search(
+            r"#define\s+UBI_START_ADDR\s+0x(?P<val>[0-9a-fA-F]+)", ubi_text
+        )
+        if m:
+            out["ubi_start_default"] = int(m.group("val"), 16)
+        if "OVERRIDE_UBI_START_ADDR" in ubi_text:
+            out["ubi_start_overridable"] = 1
+    return out
+
+
+def atf_build_defines_fip_in_boot_partition(result: CheckResult) -> bool:
+    if not ATF_BUILD.exists():
+        result.fail("atf-mode", f"{ATF_BUILD} not found")
+        return False
+    text = ATF_BUILD.read_text(encoding="utf-8")
+    return "ECNT_NAND_FIP_IN_BOOT_PARTITION" in text
+
+
+def check_atf(
+    result: CheckResult,
+    atf: dict[str, int],
+    wf: dict[str, int],
+    parts: list[Part],
+    ubi_in_boot_partition: bool,
+    atf_available: bool,
+) -> None:
+    bootloader = part_by_label(parts, "bootloader")
+    ubi = part_by_label(parts, "ubi")
+
+    if atf_available and "fip_offset" in atf and "DEFAULT_FIP_OFFSET" in wf:
+        if atf["fip_offset"] != wf["DEFAULT_FIP_OFFSET"]:
+            result.fail(
+                "workflow-vs-atf",
+                f"workflow DEFAULT_FIP_OFFSET = 0x{wf['DEFAULT_FIP_OFFSET']:x} "
+                f"but TF-A PLAT_ECNT_FIP_OFFSET = 0x{atf['fip_offset']:x}; the "
+                f"composed image and BL23 would disagree about where the FIP is",
+            )
+    if atf_available and "fip_max_size" in atf and "BL23_FIP_MAX_SIZE" in wf:
+        if atf["fip_max_size"] != wf["BL23_FIP_MAX_SIZE"]:
+            result.fail(
+                "workflow-vs-atf",
+                f"workflow BL23_FIP_MAX_SIZE = 0x{wf['BL23_FIP_MAX_SIZE']:x} but "
+                f"TF-A PLAT_ECNT_FIP_MAX_SIZE = 0x{atf['fip_max_size']:x}; the "
+                f"FIP size gate would not match what BL23 will read",
+            )
+
+    if bootloader and "fip_offset" in atf and "fip_max_size" in atf:
+        need = atf["fip_offset"] + atf["fip_max_size"]
+        if bootloader.size < need:
+            result.fail(
+                "boot-window",
+                f"bootloader partition is 0x{bootloader.size:x} but BL23 may "
+                f"read up to 0x{need:x} (FIP offset 0x{atf['fip_offset']:x} + "
+                f"max size 0x{atf['fip_max_size']:x}); shrink the FIP window or "
+                f"grow the partition",
+            )
+        else:
+            result.note(
+                f"bootloader window: 0x{bootloader.size - need:x} bytes of slack "
+                f"after the maximum FIP BL23 can read"
+            )
+
+    if ubi is None:
+        return
+    start = atf.get("ubi_start_default")
+    if start is None:
+        return
+    if ubi_in_boot_partition:
+        if ubi.start == start:
+            result.note(
+                f"ubi starts at ATF's default UBI_START_ADDR (0x{start:x}) "
+                f"although the build selects the mtd0 FIP path; harmless today"
+            )
+    elif ubi.start != start:
+        result.fail(
+            "ubi-start-vs-atf",
+            f"build-atf.sh no longer defines ECNT_NAND_FIP_IN_BOOT_PARTITION, so "
+            f"BL23 would load the FIP from the UBI volume 'fip' starting at "
+            f"UBI_START_ADDR 0x{start:x}, but this layout puts ubi at "
+            f"0x{ubi.start:x}. Either restore the define or set "
+            f"OVERRIDE_UBI_START_ADDR=0x{ubi.start:x}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Driver
+# ---------------------------------------------------------------------------
+
+
+def check_board(board: str, atf_dir: Path | None, require_atf: bool) -> CheckResult:
+    result = CheckResult()
+    dts_path = REPO / "arch" / "arm" / "dts" / f"{board}.dts"
+    board_env = REPO / "board" / "airoha" / "an7581" / f"{board}.env"
+    defconfig = REPO / "configs" / f"{board}_defconfig"
+
+    if not dts_path.exists():
+        result.fail("dts", f"{dts_path}: board device tree not found")
+        return result
+
+    parts = parse_dts_partitions(dts_path, result)
+    check_partition_table(result, dts_path, parts)
+
+    board_geo = parse_board_geometry(BOARD_SRC, result)
+    check_board_geometry(result, board_geo, parts)
+
+    env = parse_board_env(board_env, result)
+    tftp = parse_tftp_env_sizes(TFTP_ENV, result)
+    check_env(result, env, tftp, parts, defconfig)
+
+    wf = parse_workflow_env(WORKFLOW, result)
+    check_workflow(result, wf, parts)
+
+    in_boot_partition = atf_build_defines_fip_in_boot_partition(result)
+    atf: dict[str, int] = {}
+    if atf_dir is not None:
+        atf = parse_atf(atf_dir, result)
+        if not atf and require_atf:
+            result.fail("atf", f"{atf_dir}: no TF-A constants parsed")
+    elif require_atf:
+        result.fail("atf", "--require-atf given but no --atf-dir")
+    else:
+        result.note(
+            f"atf checks skipped for {board} (pass --atf-dir to enable); the "
+            f"workflow-vs-atf and boot-window checks did not run"
+        )
+
+    # The memmap path is only valid if the FIP window is derived from TF-A; when
+    # ATF is absent we still verify that the mtd0 image leaves room for the
+    # documented 0x100000 window.
+    if not atf:
+        bootloader = part_by_label(parts, "bootloader")
+        if bootloader and "DEFAULT_FIP_OFFSET" in wf:
+            fallback_window = 0x100000
+            if bootloader.size < wf["DEFAULT_FIP_OFFSET"] + fallback_window:
+                result.fail(
+                    "boot-window",
+                    f"bootloader partition is 0x{bootloader.size:x}, smaller "
+                    f"than the documented FIP window 0x"
+                    f"{wf['DEFAULT_FIP_OFFSET'] + fallback_window:x}",
+                )
+
+    check_atf(result, atf, wf, parts, in_boot_partition, bool(atf))
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--board",
+        action="append",
+        choices=BOARDS,
+        help="board to check (repeatable); defaults to every supported board",
+    )
+    parser.add_argument(
+        "--atf-dir",
+        type=Path,
+        default=None,
+        help="path to the pinned TF-A source tree for boot-chain cross-checks",
+    )
+    parser.add_argument(
+        "--require-atf",
+        action="store_true",
+        help="fail instead of skipping when --atf-dir is absent or unparsable",
+    )
+    args = parser.parse_args()
+
+    boards = args.board or list(BOARDS)
+    failed = False
+    for board in boards:
+        result = check_board(
+            board, args.atf_dir.resolve() if args.atf_dir else None, args.require_atf
+        )
+        for note in result.notes:
+            print(f"note: {board}: {note}")
+        if not result.ok:
+            failed = True
+            for fail in result.failures:
+                print(f"FAIL: {board}: {fail}", file=sys.stderr)
+        else:
+            print(f"{board}: partition layout consistent")
+
+    if failed:
+        return 1
+    print("partition layout cross-checks: OK")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

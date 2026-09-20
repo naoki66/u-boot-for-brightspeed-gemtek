@@ -264,6 +264,16 @@ jobs:
           echo "FIP payload alignment: ${fip_align}"
           echo "Signing: required"
 
+      # Cheap repository-only gate: runs before the toolchain install so a
+      # partition edit that contradicts the board geometry or the rescue env
+      # fails in seconds instead of after the full U-Boot build.
+      - name: Check partition layout (repository)
+        env:
+          BOARD: ${{ matrix.board }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/check-partition-layout.py --board "${BOARD}"
+
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -393,6 +403,20 @@ jobs:
           install -m 0755 \
             atf-tools/lzma-4.65/CPP/7zip/Compress/LZMA_Alone/lzma \
             atf-tools/lzma
+
+      # Full gate: now that the pinned TF-A tree is on disk, cross-check the
+      # boot chain against the partition table. This is what catches a silent
+      # switch back to BL23's UBI FIP path (UBI_START_ADDR 0x20000) or a drift
+      # in PLAT_ECNT_FIP_OFFSET / PLAT_ECNT_FIP_MAX_SIZE.
+      - name: Check partition layout against pinned TF-A
+        env:
+          BOARD: ${{ matrix.board }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/check-partition-layout.py \
+            --board "${BOARD}" \
+            --atf-dir trusted-firmware-a-build \
+            --require-atf
 
       - name: Build BL2 and BL31
         env:
