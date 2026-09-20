@@ -169,9 +169,11 @@ X 模式加载临时引导。
     > 分区已保存 `ipaddr`，U-Boot 会沿用该地址；请以串口打印的
     > `recovery network: eth0/gdm1 1G switch port only, http://<addr>/` 为准，
     > 或先 `setenv ipaddr 192.168.0.1` 再重试。
-12. 选择系统镜像 `ubi-squashfs-sysupgrade.itb`；`BL2` 选择
-    `<board>-...-ubi-preloader.bin`，`U-Boot` 选择
-    `<board>-...-ubi-bl31-uboot.fip`。
+12. 在恢复页上传。左侧三个目标共用一个文件选择框：`Firmware Recovery` 选
+    `ubi-squashfs-sysupgrade.itb`；`Update U-Boot` 选 `<board>-...-mtd0-signed.bin`
+    （**必须正好 2 MiB**）。`Update U-Boot` **没有单独的 BL2 字段**，也不接受裸文件
+    ——mtd0 是"0x800 前导区 + 一个合并 FIP"的整体，BL2、BL31/BL33 与证书都在同一个
+    FIP 里；上传 `u-boot.bin`、裸 `.fip` 或 `ubi-preloader.bin` 都会被后端拒绝。
 13. 等待数分钟完成刷写，之后务必断电重启设备。
 
 > [!TIP]
@@ -258,7 +260,7 @@ TFTP 传输和 Web Recovery 的上传缓冲互相踩内存。
 | `<board>-...-mtd0-signed.bin` | 完整 2 MiB `/dev/mtd0` bootloader 镜像，用于替换 `bootloader` 分区 |
 | `<board>-...-fip-signed.bin` | signed FIP 本体，位于完整 mtd0 镜像的 `0x800` 偏移 |
 | `<board>-...-ubi-preloader.bin` | 包含 BL2 和 `tb-fw-cert` 的 signed FIP，用于 X 模式第一段 XMODEM |
-| `<board>-...-ubi-bl31-uboot.fip` | BL31 + U-Boot/BL33 FIP，用于 X 模式第二段 XMODEM 和 Web Recovery |
+| `<board>-...-ubi-bl31-uboot.fip` | BL31 + U-Boot/BL33 FIP，用于 X 模式第二段 XMODEM |
 | `<board>-...-bootext-bl2.bin` | BootROM X 模式应急垫片（`mtd0-prefix.bin` + 本仓库编译的 BL2，**未真机验证**） |
 | `<board>-...-bl31.bin` | 源码构建的 BL31 Airoha LZMA 固件，便于核对和离线调试 |
 | `<board>-...-u-boot-raw.bin` | 裸 U-Boot/BL33，仅供调试分析 |
@@ -277,7 +279,7 @@ CertUtil -hashfile <board>-...-mtd0-signed.bin SHA256
 
 > [!IMPORTANT]
 > 只有 `<board>-...-mtd0-signed.bin` 是完整 2 MiB `mtd0` 签名镜像。其它裸文件或
-> FIP 文件用于救砖、调试或 Web Recovery，不要当作完整 `mtd0` 直接写入
+> FIP 文件用于 X 模式 XMODEM 救砖或离线调试，不要当作完整 `mtd0` 直接写入
 > `0x00000000`。
 
 <p align="right"><a href="#top"><b>↑ 返回顶部</b></a></p>
