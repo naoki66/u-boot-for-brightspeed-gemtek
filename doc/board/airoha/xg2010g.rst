@@ -642,18 +642,122 @@ X 模式依赖 BootROM 和串口，Web Recovery 依赖 U-Boot 的 lwIP 网络栈
      - **手动指定写入地址**：写 ``${tftpboot_file}`` 到 ``${tftpboot_part}`` 的
        偏移 ``${tftpboot_ofs}``，长度 ``${tftpboot_len}``
 
-手动模式示例（修一个固定助手覆盖不到的布局）：:
+手动指定地址写入（``tftp_flash_manual``）
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-    setenv tftpboot_file my-image.bin
-    setenv tftpboot_part bootloader
-    setenv tftpboot_ofs  0x800
-    setenv tftpboot_len  0x200000
-    run tftp_flash_manual
+固定助手只覆盖已知的几种布局；``tftp_flash_manual`` 是给"固定助手都不匹配"的
+情况用的逃生口。它由三个变量决定写到哪：
 
-手动模式**不做任何目标合法性检查**，这是它的用途，也是它的风险：写错区域可能
-覆盖校准数据。先用 ``mtd list`` 和
-``mtd read <part> ${tftpverify_addr} 0 0x100`` 确认目标，并先备份
-（Web Recovery 的“备份”页可以下载 ``uenv`` / ``dsd``）。
+.. list-table::
+   :header-rows: 1
+   :widths: 24 18 58
+
+   * - 变量
+     - 示例
+     - 含义
+   * - ``tftpboot_file``
+     - ``my-image.bin``
+     - TFTP 服务器上的文件名（相对于 TFTP 根目录）
+   * - ``tftpboot_part``
+     - ``bootloader``
+     - MTD **分区标签**，必须与 ``mtd list`` 打印的 ``"..."`` 完全一致
+   * - ``tftpboot_ofs``
+     - ``0x800``
+     - **相对该分区起始**的偏移（不是全片绝对地址）
+   * - ``tftpboot_len``
+     - ``0x200000``
+     - 要擦除并写入的长度（字节）
+
+它展开成这一串：
+
+.. code-block:: text
+
+   tftpboot ${tftpboot_addr} ${tftpboot_file}
+   itest.l ${filesize} -le ${tftpboot_len}
+   mtd erase ${tftpboot_part} ${tftpboot_ofs} ${tftpboot_len}
+   mtd write ${tftpboot_part} ${tftpboot_addr} ${tftpboot_ofs} ${tftpboot_len}
+   mtd read  ${tftpboot_part} ${tftpverify_addr} ${tftpboot_ofs} ${tftpboot_len}
+   cmp.b ${tftpboot_addr} ${tftpverify_addr} ${tftpboot_len}
+
+**偏移基准容易搞错：``tftpboot_ofs`` 是分区相对偏移，不是芯片绝对地址。**
+``mtd read/write`` 内部用 ``get_mtd_device_nm("<part>")`` 取到的是**分区**的
+``mtd_info``，命令里的 offset 从该分区开头算起。而 ``mtd list`` 打印的是**绝对**
+地址，两者差一个分区起始地址。XG2010G 的对照：
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 22 34 22
+
+   * - 分区标签
+     - 绝对起始
+     - 大小
+     - 写到分区开头时 ``tftpboot_ofs``
+   * - ``bootloader``
+     - ``0x00000000``
+     - ``0x200000`` (2 MiB)
+     - ``0``
+   * - ``uenv``
+     - ``0x00200000``
+     - ``0x200000`` (2 MiB)
+     - ``0``
+   * - ``dsd``
+     - ``0x00400000``
+     - ``0x200000`` (2 MiB)
+     - ``0``
+   * - ``ubi``
+     - ``0x00600000``
+     - ``0x1b800000``
+     - 用 UBI 卷接口，不要直接写
+
+也就是说，要写 ``0x00200000`` 处的 uenv，正确写法是
+``tftpboot_part=uenv`` + ``tftpboot_ofs=0``，**不是**
+``tftpboot_part=bootloader`` + ``tftpboot_ofs=0x200000``——后者会写到
+bootloader 分区越界处并被拒绝（``mtd read`` 会先报
+``Offset not aligned`` 或超出分区）。
+
+对齐与长度约束（来自 ``cmd/mtd.c`` 的实际检查）：
+
+* ``mtd erase`` 的 offset 和 len 都必须**擦除块对齐**（本板 ``0x20000``）。不满足
+  直接报错不执行。
+* ``mtd read/write`` 的 offset 必须**页对齐**（本板 ``0x800``）；len 不对齐会被
+  自动向上取整到页边界并打印提示。
+* ``mtd write`` 在 NAND 上**默认跳过全 0xFF 的页**（"不写空页"）。这正好符合需求：
+  已擦除区域本来就读作 0xFF，跳过可以避免无谓地覆盖擦除块、也避免误碰坏块标记。
+  真需要强制写空页时用 ``mtd write.dontskipff``，但**一般不要用**
+  （命令帮助里原话是 "don't use it if unsure"）。
+
+完整示例——把一份自带 0x800 前导区的镜像写到 bootloader 分区开头：
+
+.. code-block:: console
+
+   setenv serverip 192.168.0.254
+   setenv tftpboot_file xg2010g-preloader.bin
+   setenv tftpboot_part bootloader
+   setenv tftpboot_ofs  0
+   setenv tftpboot_len  0x20000
+   run net_init
+   run tftp_flash_manual
+
+写入前先确认目标，再备份：
+
+.. code-block:: console
+
+   mtd list                                  /* 看 "..." 里的分区标签与绝对地址 */
+   ubi part ubi ; ubi info l                 /* 看 ubi 里的卷 */
+   mtd read bootloader ${tftpverify_addr} 0 0x100
+   md.b ${tftpverify_addr} 0x100             /* 看一眼现在的开头是什么 */
+
+.. warning::
+
+   手动模式**不做任何目标合法性检查**，既不校验文件类型、也不校验 offset 是否
+   落在一个"应该写"的区域。这是它的用途，也是它的风险：
+
+   * 写错 ``tftpboot_part`` 或 ``tftpboot_ofs`` 可能覆盖出厂校准数据
+     （``factory`` / ``dsd`` / ``PON`` / ``BOSA``），且**不可恢复**；
+   * 写坏 ``bootloader`` 会让设备只能走 X 模式或 NAND 编程器。
+
+   所以：**写入前先用 Web Recovery 的“备份”页把 ``uenv`` / ``dsd`` 和整片
+   flash 下载到电脑**，并记录 ``mtd list`` 输出。
 
 每个助手在**写完都会读回比对**：``mtd read``（或 ``ubi read``）到
 ``${tftpverify_addr}`` 后 ``cmp.b`` 源缓冲，一致才打印
