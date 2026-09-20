@@ -488,9 +488,11 @@ TFA 变量**，避免误填不同 TF-A 版本导致 FIP/证书产物不可复现
 Mbed TLS 固定为 3.6.6（``0bebf8b8c7f07abe3571ded48a11aa907a1ffb20``）。
 该树使用只在 3.6 及以后存在的 PSA 配置头，3.4.x 无法编译。
 
-``fiptool`` 和 ``cert_create`` 与固件同源，但借用上游的 ``PLAT=fvp`` 作为顶层
-Makefile 的载体，因此这条命令必须把三个开关显式重置为上游 v2.15.0 的默认值：
-``TRUSTED_BOARD_BOOT=0``、``DECRYPTION_SUPPORT=none``、``DYN_DISABLE_AUTH=0``。
+workflow 的 ``Build fiptool and cert_create`` 一步把上游的 ``PLAT=fvp`` 借来当
+顶层 Makefile 的载体（两个工具的源码都不依赖平台），因此需要在命令行上显式把三个
+开关重置为上游 v2.15.0 的默认值：``TRUSTED_BOARD_BOOT=0``、
+``DECRYPTION_SUPPORT=none``、``DYN_DISABLE_AUTH=0``。理由如下 —— 这是 CI 内部的
+一处非显然耦合，平时无需手工操作，但升级 pinned ``ATF_REF`` 时要重新核对。
 Airoha 的 ``make_helpers/defaults.mk`` 把八个默认值从上游的 0/none 翻成了
 1/aes_gcm（``BL2_IN_XIP_MEM``、``DECRYPTION_SUPPORT``、``DYN_DISABLE_AUTH``、
 ``ENABLE_CONSOLE_GETC``、``GENERATE_COT``、``RESET_TO_BL2``、``SAVE_KEYS``、
@@ -983,9 +985,20 @@ BL2 和 BL31 换源之后，CI 全绿**不能推出设备能启动**。CI 覆盖
 1. **先看结构，不碰设备**：``fiptool info`` 确认 FIP 里的 ``bl2``、``bl31`` 和
    ``nt-fw`` 条目、条目顺序，以及写 FIP 时用的 ``--plat-toc-flags`` 值符合
    预期。
-2. **串口看版本串**：换树后 BL2/BL31 的 banner 应显示 ``2.15.0``，而不是旧树的
-   ``v2.10.0-dirty``。仍显示旧版本，说明写的不是本次构建的 mtd0，或没有从 mtd0
-   启动。
+2. **写入前先确认版本串，再串口复核**：banner 打的是
+   ``v${VERSION}(${BUILD_TYPE}):${BUILD_STRING}``，版本号取自被编的那棵树、
+   ``BUILD_STRING`` 取自 ``git describe --always --dirty``。这一步不必等上机 ——
+   在自己的镜像里搜一下就能确认：
+
+   .. code-block:: console
+
+      grep -a -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+([a-z]*):[0-9a-zA-Z._-]\+' <board>-...-mtd0-signed.bin
+
+   换树后应得到 ``v2.15.0``（CI 本轮产物实测为
+   ``v2.15.0(release):6cf15a1-dirty``，其中 ``6cf15a1`` 就是 pinned commit 的短号，
+   ``-dirty`` 来自 ``prepare-atf.py`` 改过工作区，属正常）。仍是 ``v2.10.0`` 说明
+   拿错了 mtd0。串口再复核一次同一个串：它对不上就说明写的不是这个镜像，或没有从
+   mtd0 启动。注意 BL31 是 LZMA 压缩的，压缩后的 ``bl31.bin`` 里搜不到该串。
 3. **确认 BL2 能读 NAND 并走到救援分支**：即请求 FIP 时出现 XMODEM 提示。走不到
    这一步，先回头查 ``TCSUPPORT_EMMC`` 与 FIP 窗口参数。
 4. **确认 DDR 探测结果**：进入 U-Boot 后核对 DDR 容量与型号。这是 EL2 与 DDR
