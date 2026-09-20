@@ -1057,3 +1057,87 @@ USXGMII 口不在 U-Boot recovery DTS 中启用，避免多 MAC 随机地址和�
 页面里不写死板型。型号由恢复服务器通过 ``/about`` 端点的 ``board`` 字段
 给出（取自 ``CONFIG_DEFAULT_DEVICE_TREE``），前端在运行时注入，因此几块板
 可以共用同一份页面资源，不会出现 XR1710G 显示 XG2010G 的情况。
+
+与 ImmortalWrt an7581 UBI 产物的对照
+----------------------------------------
+
+ImmortalWrt 的 ``airoha/an7581`` target 发布一组以 ``ubi`` 命名的启动产物。
+它们与本仓库的产物同名不同源，很容易被混用，所以这里记录实测差异。下表数据
+取自 2026-09-20 的快照（设备 ``nokia_xg-040g-md-ubi``，内核
+``Linux-6.18.52``）；快照会滚动，复核时请以当次 ``sha256sums`` 为准。
+
+.. list-table::
+   :header-rows: 1
+   :widths: 27 12 61
+
+   * - ImmortalWrt 产物
+     - 大小
+     - 实测构成，以及与本仓库产物的差别
+   * - ``...-ubi-preloader.bin``
+     - 112167
+     - ``fiptool create --tb-fw an7581-bl2.bin`` 的产物，ToC 只有 1 条
+       ``UUID_TRUSTED_BOOT_FIRMWARE_BL2``（载荷在 ``0x60``），**不含任何
+       证书**。本仓库的 ``ubi-preloader.bin`` 是 2 条：``BL2`` 加
+       ``tb_fw.crt``，并且用 ``--align 0x400`` 对齐
+   * - ``...-ubi-bl31-uboot.fip``
+     - 314152
+     - ``fiptool create --soc-fw bl31.lzma --nt-fw u-boot.lzma`` 的产物，ToC
+       只有 2 条（``BL31`` 在 ``0x88``、``BL33`` 在 ``0xae4c``），**不含任何
+       证书**。本仓库的 ``ubi-bl31-uboot.fip`` 是 7 条：``BL31``、``BL33``，
+       加 3 张 key 证书与 2 张 content 证书
+   * - ``...-ubi-initramfs-recovery.itb``
+     - 9437184
+     - FIT：``kernel-1``（``lzma``，``load`` 与 ``entry`` 都是
+       ``0x80200000``，initramfs 是编进内核镜像的、没有 ramdisk 节点）加
+       ``fdt-1``，配置节点为 ``config-1``，尾部用 ``0x00`` 补齐到 72 个
+       128 KiB 块。**本仓库没有对应产物**：本仓库只编译 U-Boot 与 TF-A，
+       不编译内核
+
+两边的体积差来自对齐，不是内容差。``fiptool`` 的 ``--align`` 默认值是 ``1``
+（``tools/fiptool/fiptool.c`` 里的 ``static unsigned long align = 1;``，
+``--help`` 也写 ``default: 1``），``pack_images()`` 用
+``(entry_offset + align - 1) & ~(align - 1)`` 对齐每个载荷，不传就是紧排。
+ImmortalWrt 不传，于是第二个条目紧接在第一个之后（``0x88`` + ``0xadc4`` =
+``0xae4c``）；本仓库传 ``${BOARD_UPPER}_FIP_ALIGN``（XG2010G 为 ``0x400``），
+每个条目都落在 ``0x400`` 边界上。
+
+互操作规则
+~~~~~~~~~~
+
+* **BL2 与 BL31/U-Boot 必须来自同一次构建。** 不要跨项目、也不要跨本仓库的
+  两个 release 混搭，例如用 ImmortalWrt 的 ``...-ubi-preloader.bin`` 去配本
+  仓库的 ``ubi-bl31-uboot.fip``。
+* 本仓库的启动产物带完整证书链，ImmortalWrt 的两个产物一张证书都没有。两棵
+  vendor 树（``Ansuel/atf-airoha`` 与 ``Yuzhii0718/atf-airoha``）的
+  ``make_helpers/defaults.mk`` 取值完全相同、都默认 ``TRUSTED_BOARD_BOOT := 1``，
+  而 ImmortalWrt 既不覆盖它、也不给 TF-A 打补丁。也就是说证书在这条链上
+  **不是启动的必要条件**，但"是否被校验、由谁校验"**在不刷机的前提下无法在
+  本仓库证明**。取证之前请一律按"成对使用"处理。
+* 本仓库的 ``boot_ubi`` 可以直接启动上面那类 ``...-ubi-*.itb``：它的链路是
+  ``ubi part ubi`` → ``ubi read ${loadaddr} fit`` →
+  ``bootm ${loadaddr}#${bootconf}``（见 ``board/airoha/an7581/xg2010g.env``，
+  ``bootconf=config-1``），而这些 ITB 的默认配置节点就是 ``config-1``、
+  ``load``/``entry`` 为 ``0x80200000``，落在"装载到 ``0x81800000`` 再由
+  ``bootm`` 重定位"的正常范围内。但**写哪个卷要留意**：恢复服务器与串口
+  TFTP 助手目前只认 ``fit`` 一个卷（``recovery_mtd=fit``，
+  ``net/lwip/httpd_recovery.c`` 里也是写死的 ``"fit"``），把恢复镜像写进
+  ``fit`` 会覆盖生产固件。
+* ImmortalWrt 的 TF-A 包直接下载 ``Ansuel/atf-airoha`` 整个仓库
+  （``package/boot/arm-trusted-firmware-airoha/Makefile`` 里
+  ``SOURCE_VERSION=94892b9e42eb1f9``），既不打补丁也不做 overlay 叠加。这
+  与本仓库现在"单棵 pinned 树"的做法一致，也是那条旧 overlay 路径被移除的
+  理由。
+
+复核方法
+~~~~~~~~
+
+.. code-block:: console
+
+   # 官方校验和（快照会滚动，以当次结果为准）
+   curl -sS https://downloads.immortalwrt.org/snapshots/targets/airoha/an7581/sha256sums
+
+   # FIP 条目：本仓库 CI 用的是同一个 fiptool，输出格式一致
+   fiptool info nokia_xg-040g-md-ubi-bl31-uboot.fip
+
+   # FIT 头不需要 mkimage：它本身就是 FDT，可以直接 dump
+   fdtdump nokia_xg-040g-md-ubi-initramfs-recovery.itb | head -40
