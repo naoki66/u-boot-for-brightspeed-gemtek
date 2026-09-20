@@ -107,10 +107,14 @@ REQUIRED_LABELS = ("bootloader", "uenv", "dsd", "ubi", "reserved_bmt")
 
 # Where the shared env file and the board env file are expected to agree: the
 # helper name whose literal size assertion must equal the partition it writes.
+# Every entry is helper -> partition label, and each helper must assert the
+# size with 'itest.l ${filesize} -eq <len>' before erasing, so the comparison
+# in check_env() only has to cover the two 2 MiB calibration partitions.  The
+# mtd0 helper needs no entry: it asserts ${tftpboot_size}, and that variable is
+# already checked against the bootloader partition below.
 TFTP_ENV_SIZE_RULES = {
     "tftp_flash_uenv": "uenv",
     "tftp_flash_dsd": "dsd",
-    "tftp_flash_bl2": None,  # BL2 asserts 0x1f800, a length, not a partition
 }
 
 
@@ -439,7 +443,7 @@ def parse_board_env(path: Path, result: CheckResult) -> dict[str, int]:
         return {}
     text = path.read_text(encoding="utf-8")
     out: dict[str, int] = {}
-    for key in ("tftpboot_size", "tftpboot_bl2_size", "recovery_size_uboot"):
+    for key in ("tftpboot_size", "recovery_size_uboot"):
         m = re.search(rf"^{key}\s*=\s*(?P<val>[0-9a-fA-Fx]+)\s*$", text, re.MULTILINE)
         if not m:
             result.fail("env", f"{path.name}: {key} not found")
@@ -502,8 +506,9 @@ def check_env(
                 f"bootloader partition is 0x{bootloader.size:x}",
             )
 
+    parts_by_label = {"uenv": uenv, "dsd": dsd}
     for helper, label in TFTP_ENV_SIZE_RULES.items():
-        part = {"uenv": uenv, "dsd": dsd}.get(label) if label else None
+        part = parts_by_label.get(label)
         if part is None or helper not in tftp:
             continue
         if tftp[helper] != part.size:

@@ -622,8 +622,10 @@ U-Boot 自带的 TFTP 刷写助手说明了它到底是什么：
 
 X 模式依赖 BootROM 和串口，Web Recovery 依赖 U-Boot 的 lwIP 网络栈。两者都可能
 不可用（网口没起来、镜像已经不能启动、恢复页挂了）。因此在 U-Boot 里再提供一条
-**纯串口 + TFTP** 的写入通道，设计抄自原厂 U-Boot 的
-``boot_tftp_write_bl2`` / ``mtd_write_bl2`` 助手和它的启动菜单。
+**纯串口 + TFTP** 的写入通道：骨架抄自原厂 U-Boot 的 ``boot_tftp_write_bl2`` /
+``mtd_write_bl2`` 助手和它的启动菜单，而**读回比对是本仓库加的**——原厂那两个
+助手写完 ``mtd write`` 就结束，``mtd read`` + ``cmp.b`` 一步是从它的 UBI 助手
+``ubi_verify_fip`` / ``ubi_verify_production`` 抄来的。
 
 默认环境变量（``board/airoha/an7581/xg2010g.env`` 与共用的
 ``include/env/airoha/an7581-tftp.env``）：:
@@ -632,7 +634,6 @@ X 模式依赖 BootROM 和串口，Web Recovery 依赖 U-Boot 的 lwIP 网络栈
     tftpboot_addr=0x90000000        # 暂存区，刻意不用 $loadaddr
     tftpverify_addr=0x94000000      # 读回比对区
     tftpboot_size=0x200000          # 完整 mtd0 镜像长度
-    tftpboot_bl2_size=0x20000       # preloader 写入的擦除区长度
 
 ``tftpboot_addr`` 与 ``$loadaddr`` 分开是有意为之：Web Recovery 的上传缓冲在
 ``recovery_addr``（``0x81800000``），分开可以避免 TFTP 传输和正在进行的 HTTP
@@ -655,10 +656,6 @@ X 模式依赖 BootROM 和串口，Web Recovery 依赖 U-Boot 的 lwIP 网络栈
      - 作用
    * - ``run tftp_flash``
      - 写完整 2 MiB ``mtd0`` 到 ``bootloader`` 分区（自带 0x800 前导区）
-   * - ``run tftp_flash_bl2``
-     - 写 ``preloader.bin`` 这类自带 0x800 前导区的镜像。先用 ``iret`` 把
-       ``0x20000`` 暂存区填 ``0xFF``，把文件放到 ``+0x800``，再整块写入
-       —— 与原厂 ``mw.b $loadaddr 0xff 0x20000`` 完全一致
    * - ``run tftp_flash_fit``
      - 把系统固件写进 UBI 的 ``fit`` 卷
    * - ``run tftp_flash_uenv`` / ``run tftp_flash_dsd``
@@ -666,6 +663,16 @@ X 模式依赖 BootROM 和串口，Web Recovery 依赖 U-Boot 的 lwIP 网络栈
    * - ``run tftp_flash_manual``
      - **手动指定写入地址**：写 ``${tftpboot_file}`` 到 ``${tftpboot_part}`` 的
        偏移 ``${tftpboot_ofs}``，长度 ``${tftpboot_len}``
+
+.. note::
+
+   这里**故意没有"只刷 preloader/BL2"的助手**。原厂 ``mtd_write_bl2`` 只写
+   ``erasesize`` 一块（``0x20000``），在本布局下会丢数据：mtd0 里的启动链是
+   **一个合并 FIP**，实测从 ``0x800`` 一直跨到 ``0x73248``（约 3.6 个擦除块），
+   只写第一块会把 BL31 和 BL33 留在旧内容里——或者更糟，擦掉了却没写回，得到
+   一台既不启动、也回不到串口 X 模式的设备（BootROM 看到 ``mtd0+0`` 还有合理的
+   入口就会去启动然后挂住，不再回落到串口）。原厂能只写一块是因为它的第二级在
+   另一块区域，本布局不行。整块 mtd0 一律走 ``run tftp_flash``。
 
 手动指定地址写入（``tftp_flash_manual``）
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -801,12 +808,11 @@ bootloader 分区越界处并被拒绝（``mtd read`` 会先报
    0  Boot system                     run boot_ubi
    1  Web recovery                    run http_recovery
    2  Flash mtd0 image via TFTP
-   3  Flash BL2/preloader via TFTP
-   4  Flash system firmware via TFTP
-   5  Manual NAND write via TFTP
-   6  Show storage information        mtd list / ubi info l
-   7  Show flash environment          printenv 相关变量
-   8  Reboot                           reset
+   3  Flash system firmware via TFTP
+   4  Manual NAND write via TFTP
+   5  Show storage information        mtd list / ubi info l
+   6  Show flash environment          printenv 相关变量
+   7  Reboot                           reset
 
 菜单是**可选**的：默认 ``bootcmd`` 仍是 ``run boot_ubi || http_recovery``，
 所以无人值守开机时系统照常启动、启动失败照常落到 Web Recovery。菜单只是让这些

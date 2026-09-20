@@ -210,16 +210,20 @@ run tftp_flash          # 完整 2 MiB mtd0 -> bootloader 分区
 | 助手 | 作用 |
 | --- | --- |
 | `run tftp_flash` | 写完整 2 MiB `mtd0` 到 `bootloader` 分区 |
-| `run tftp_flash_bl2` | 写 `preloader.bin` 这类自带 0x800 前导区的镜像（暂存区先填 0xFF，文件放 `+0x800`，同原厂做法） |
 | `run tftp_flash_fit` | 把系统固件写进 UBI 的 `fit` 卷 |
 | `run tftp_flash_uenv` / `run tftp_flash_dsd` | 恢复 2 MiB 出厂校准分区 |
 | `run tftp_flash_manual` | **手动指定地址**：写 `${tftpboot_file}` 到 `${tftpboot_part}` 偏移 `${tftpboot_ofs}`、长度 `${tftpboot_len}` |
+
+**没有"只刷 BL2"的助手**：mtd0 里的启动链是一个跨约 3.6 个擦除块的合并 FIP，
+只写前 `0x20000` 会丢掉 BL31/BL33，得到一台既不启动、也回不到串口 X 模式的设备。
+原厂能这么做是因为它的第二级在另一块区域，本布局不行——整块 mtd0 走
+`run tftp_flash`。
 
 **每个助手写完都会读回比对**（`mtd read` + `cmp.b`），一致才报
 `written and read-back verified.`，不一致直接报 `FAILED`。这一步不能省：NAND
 写入失败或碰到坏块时，不读回就"看起来成功"，而镜像其实不能启动。
 
-`run boot_menu` 打开启动菜单（Boot system / Web recovery / 三条 TFTP 刷写 /
+`run boot_menu` 打开启动菜单（Boot system / Web recovery / 两条 TFTP 刷写 /
 手动写入 / 存储信息 / 环境变量 / 重启）。默认 `bootcmd` **不变**，仍是
 `run boot_ubi || http_recovery`，所以无人值守开机照常启动、失败照常落到 Web
 Recovery；菜单只是让这些助手随时可用。
