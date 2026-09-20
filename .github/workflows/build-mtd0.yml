@@ -360,10 +360,20 @@ jobs:
       # there is no version skew between the tool that writes the FIP and the
       # code that parses it. PLAT=fvp only selects a platform for the host
       # tools' build system; nothing target-specific is compiled here.
+      #
+      # TRUSTED_BOARD_BOOT=0 is required, not cosmetic. The Airoha port flips
+      # this default to 1 (upstream v2.15.0 ships 0), and Arm's
+      # plat/arm/board/common/board_common.mk insists on ARM_ROTPK_LOCATION
+      # whenever it is on - a knob neither tree gives a default. Our own
+      # PLAT=en7523 never includes that file, so this only bites the
+      # PLAT=fvp vehicle used to reach the two host-tool targets.
+      # Neither tool's source depends on the switch, so the binaries are
+      # unaffected.
       - name: Build fiptool and cert_create
         run: |
           set -euo pipefail
-          make -C trusted-firmware-a PLAT=fvp fiptool certtool -j"$(nproc)"
+          make -C trusted-firmware-a PLAT=fvp TRUSTED_BOARD_BOOT=0 \
+            fiptool certtool -j"$(nproc)"
           test -x trusted-firmware-a/tools/fiptool/fiptool
           test -x trusted-firmware-a/tools/cert_create/cert_create
 
