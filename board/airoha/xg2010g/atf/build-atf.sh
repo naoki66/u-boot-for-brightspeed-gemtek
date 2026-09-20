@@ -15,46 +15,112 @@ trap 'rm -rf "$work_dir"' EXIT
 mkdir -p "$OUTPUT_DIR"
 rm -f "$OUTPUT_DIR/bl2.bin" "$OUTPUT_DIR/bl31.bin"
 
+# BL2 与 BL31 共用 build/en7523/release。`make clean` 在某些环境会静默失败，
+# 于是下一阶段会链到上一阶段遗留的目标文件 —— 例如 BL31 链到为 BL2 编出来的
+# aarch32 libc/libmbedtls —— 产出截断或不可用的镜像，而且链得过去、不报错。
+# 所以这里不以 `make clean` 的返回值为准，而是强制确认对象树真的消失。
+atf_build_tree="$ATF_DIR/build/en7523/release"
+
+clean_atf_tree() {
+    make -C "$ATF_DIR" PLAT=en7523 clean >/dev/null 2>&1 || true
+
+    local attempt=0
+    while [ -d "$atf_build_tree" ] && [ "$attempt" -lt 5 ]; do
+        rm -rf "$atf_build_tree" 2>/dev/null || true
+        if [ -d "$atf_build_tree" ]; then
+            mv "$atf_build_tree" "$atf_build_tree.stale.$$" 2>/dev/null || true
+        fi
+        if [ -d "$atf_build_tree" ]; then
+            sleep 1
+        fi
+        attempt=$((attempt + 1))
+    done
+    rm -rf "$ATF_DIR/build/en7523/debug" 2>/dev/null || true
+
+    if [ -d "$atf_build_tree" ]; then
+        echo "cannot remove the TF-A object tree: $atf_build_tree" >&2
+        echo "the next stage would be linked against the previous stage's objects" >&2
+        exit 1
+    fi
+}
+
+# 这套开关同时喂给 BL2 与 BL31。其中两个决定第二阶段 FIP 从哪里读，不能随手改：
+#
+# * 刻意**不**定义 TCSUPPORT_UBI_SUPPORT。顶层 Makefile 没有为它提供 add_define，
+#   只能经 BSP_CFLAGS 传 -D，所以"不传"就等于关掉。关闭后
+#   plat/ecnt/en7523/ecnt_io_storage.c 里那句无条件的
+#   `policies[FIP_IMAGE_ID] = &fip_memmap_policy;` 生效，BL23 从 mtd0 的
+#   PLAT_ECNT_FIP_OFFSET (0x800) 读 FIP，而不是去 UBI 卷里找。
+# * TCSUPPORT_EMMC 必须保留。XMODEM 救援回退整段（bl2_image_load_v2.c 里的
+#   plat_ecnt_io_switch_to_memmap() + fip_image_xmodem_load()）被
+#   `UBI_SUPPORT || EMMC` 门控，而 plat_ecnt_io_switch_to_memmap() 本身也只在
+#   同一条件下定义。本板不用 eMMC，这个开关纯粹是解锁 memmap/XMODEM 路径的钥匙。
 common_flags=(
     PLAT=en7523
     MBEDTLS_DIR="$MBEDTLS_DIR"
     CONFIG_ECNT=1
     TCSUPPORT_OPENWRT=1
     TCSUPPORT_ATF_UNOPEN=0
+    # 顶层 Makefile 由它派生 TCSUPPORT_CPU_EN7523 / EN7512 / ARMV8 / UBOOT_64BIT。
     TCSUPPORT_CPU_EN7581=1
-    TCSUPPORT_CPU_EN7523=1
-    TCSUPPORT_CPU_ARMV8=1
-    TCSUPPORT_UBOOT_64BIT=1
     TCSUPPORT_EMMC=1
     TCSUPPORT_UBOOT=1
     TCSUPPORT_BL2_OPTIMIZATION=1
-    # 第二阶段 FIP 使用 1 MiB 接收区，解压工作区从其末端开始。
+    # 第二阶段 FIP 使用 1 MiB 接收区，解压工作区从其末端开始。这个值决定
+    # PLAT_ECNT_FIP_MAX_SIZE（0x100000 而非 0x7f800），也是 XMODEM 救援的接收窗口，
+    # mtd0 的 2 MiB 布局依赖它。
     TCSUPPORT_TCBOOT_1MB_SIZE=1
-    CFLAGS=-DECNT_NAND_FIP_IN_BOOT_PARTITION
+    # 顶层 Makefile 以 $(TOOLS_DIR)/lzma 调用压缩器，注意带斜杠。
     TOOLS_DIR="$(dirname "$LZMA")"
 )
-
-make -C "$ATF_DIR" PLAT=en7523 clean
 
 build_bl2_stage() {
     local stage=$1
     local output=$2
 
+    clean_atf_tree
     make -C "$ATF_DIR" -j"$jobs" \
         "${common_flags[@]}" \
         ARCH=aarch32 \
-        CROSS_COMPILE="$AARCH64_CROSS_COMPILE" \
         ARM32TOOLCHAIN_BASE="$ARM32_CROSS_COMPILE" \
+        CROSS_COMPILE_ATF="$ARM32_CROSS_COMPILE" \
         "$stage=1" bl2
+
+    if [ ! -f "$ATF_DIR/$output" ]; then
+        echo "$output was not generated" >&2
+        exit 1
+    fi
     cp "$ATF_DIR/$output" "$work_dir/$output"
-    make -C "$ATF_DIR" PLAT=en7523 clean
+}
+
+# 截断的 lzma 载荷意味着上一阶段的对象树没被清干净，必须当场拦下：
+# 拼进 bl2.bin 之后只会在设备上表现为起不来。
+require_min_size() {
+    local file=$1
+    local minimum=$2
+    local size
+
+    size=$(stat -c%s "$file")
+    if [ "$size" -lt "$minimum" ]; then
+        echo "$file looks truncated (${size} bytes) - stale object tree?" >&2
+        exit 1
+    fi
 }
 
 build_bl2_stage IMAGE_BL21 bl21.bin
-build_bl2_stage IMAGE_BL22 bl22.lzma
-build_bl2_stage IMAGE_BL23 bl23.lzma
+require_min_size "$work_dir/bl21.bin" 14336
 
+build_bl2_stage IMAGE_BL22 bl22.lzma
+require_min_size "$work_dir/bl22.lzma" 8192
+
+build_bl2_stage IMAGE_BL23 bl23.lzma
+require_min_size "$work_dir/bl23.lzma" 20480
+
+# 生成器把 NAND 器件参数表（mfr_id / page / erase / OOB 尺寸）编进自身再打印出来，
+# 不是分区表。它必须与 BL2 用同一组结构体相关的开关编译，否则写进 flash_table.bin
+# 的结构体偏移与 BL2 侧不一致。
 cc \
+    -O2 \
     -DFLASH_TABLE_OPEN \
     -DTCSUPPORT_BL2_OPTIMIZATION \
     -I"$ATF_DIR/plat/ecnt/en7523/include" \
@@ -73,9 +139,15 @@ python3 "$script_dir/pack-bl2.py" \
     --flash-table "$work_dir/flash_table.lzma" \
     --output "$OUTPUT_DIR/bl2.bin"
 
+clean_atf_tree
 make -C "$ATF_DIR" -j"$jobs" \
     "${common_flags[@]}" \
     ARCH=aarch64 \
     CROSS_COMPILE="$AARCH64_CROSS_COMPILE" \
     bl31
-"$LZMA" e "$ATF_DIR/build/en7523/release/bl31.bin" "$OUTPUT_DIR/bl31.bin"
+
+if [ ! -f "$atf_build_tree/bl31.bin" ]; then
+    echo "bl31.bin was not generated" >&2
+    exit 1
+fi
+"$LZMA" e "$atf_build_tree/bl31.bin" "$OUTPUT_DIR/bl31.bin"

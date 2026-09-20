@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+"""Apply the Airoha TF-A patches that the XG2010G/XR1710G build still needs.
+
+This used to carry a second patch, which stopped the BL23 I/O code from
+switching the FIP source to a UBI volume. That patch is gone: the pinned
+Airoha TF-A tree already gates the switch on ``TCSUPPORT_UBI_SUPPORT``, and
+``build-atf.sh`` deliberately does not define that macro, so the
+unconditional ``fip_memmap_policy`` assignment in ``plat_ecnt_io_setup()``
+is what BL23 ends up using. Keeping the old patch would mean matching text
+that no longer exists.
+
+The remaining patch fixes an uninitialised struct in the host side flash
+table generator.
+"""
 
 import argparse
 from pathlib import Path
@@ -16,23 +29,10 @@ def main() -> None:
     parser.add_argument("source", type=Path)
     args = parser.parse_args()
 
-    replace_once(
-        args.source / "plat/ecnt/en7523/ecnt_io_storage.c",
-        """\tpolicies[FIP_IMAGE_ID] = &fip_memmap_policy;
-
-#if defined(IMAGE_BL23)
-\t/* Expect UBI if we are on NAND AND we are not in recovery procedure */
-""",
-        """\tpolicies[FIP_IMAGE_ID] = &fip_memmap_policy;
-
-/*
- * XG2010G 的 NAND 启动和 XMODEM 救援都会把第二阶段 FIP 放入
- * PLAT_ECNT_FIP_BASE，BL23 因此沿用 memmap 策略读取 BL31 与 BL33。
- */
-#if defined(IMAGE_BL23) && !defined(ECNT_NAND_FIP_IN_BOOT_PARTITION)
-\t/* Expect UBI if we are on NAND AND we are not in recovery procedure */
-""",
-    )
+    # flash_table.bin is a dump of this struct plus the entry array. The
+    # generator walks it with memcpy() before every field has been filled in,
+    # so the uninitialised tail of the struct would be written into the table
+    # and read back by BL2 as a bogus flash geometry.
     replace_once(
         args.source / "plat/ecnt/common/drivers/flash/spi_nand_flash_table.c",
         """\tint buf_size = 1000000; //16M
