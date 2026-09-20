@@ -362,9 +362,11 @@ jobs:
       # tools' build system; nothing target-specific is compiled here.
       #
       # The three overrides below are required, not cosmetic. Airoha's
-      # make_helpers/defaults.mk flips nine defaults away from upstream v2.15.0
-      # (0/none -> 1/aes_gcm) because its own PLAT=en7523 enables Trusted Board
-      # Boot, and Arm's plat/arm/** makefiles assert on them:
+      # make_helpers/defaults.mk flips eight defaults away from upstream
+      # v2.15.0 (0/none -> 1/aes_gcm), and adds a ninth line, ENCRYPT_BL33 := 0,
+      # whose value is upstream's anyway. The flips exist because its own
+      # PLAT=en7523 enables Trusted Board Boot, and Arm's plat/arm/** makefiles
+      # then assert on them:
       #   TRUSTED_BOARD_BOOT=0    - board_common.mk:14 gates its whole
       #     ARM_ROTPK_LOCATION block on this; at the tree's value of 1 every
       #     PLAT=fvp build dies with "Unsupported ARM_ROTPK_LOCATION value",
@@ -375,7 +377,7 @@ jobs:
       #     TRUSTED_BOARD_BOOT is 0. fvp's platform.mk only sets it when
       #     TRUSTED_BOARD_BOOT=1, but the tree's defaults.mk sets it outright.
       # Re-diff make_helpers/defaults.mk against upstream whenever the pinned
-      # ref is bumped; those nine flips are the place this coupling lives.
+      # ref is bumped; those eight flips are the place this coupling lives.
       #
       # Neither binary changes. No file under tools/ mentions any of the three,
       # and cert_create builds with USE_TBBR_DEFS=1, which its own tbbr.mk
