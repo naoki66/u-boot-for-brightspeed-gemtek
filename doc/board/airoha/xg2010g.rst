@@ -960,14 +960,6 @@ NAND 和分区，再在 Linux 中确认 ``cat /proc/mtd`` 的边界与本 DTS �
 例如 ``platform.mk`` 用 ``ifneq ($(TCSUPPORT_UBOOT_64BIT),1)`` 决定是否打开
 ``INIT_UNUSED_NS_EL2``，漏传就会让 BL31 改写一组 EL2 寄存器。
 
-第三项检查是 ``mk-flag-coverage``：它会扫出 TF-A 树里所有以 make 变量形式
-判断的 ``TCSUPPORT_*``，要求 ``build-atf.sh`` 显式传值，或在脚本内的
-``MK_FLAG_ALLOWLIST`` 里写明"不传就是我们要的那一支"的理由。这一项存在的
-原因是 ``add_define`` 只生成编译期 ``-D``，不会创建 make 变量，所以
-"由 ``TCSUPPORT_CPU_EN7581`` 派生" 的宏在 ``$(...)`` 判断里读到的是空值 ——
-例如 ``platform.mk`` 用 ``ifneq ($(TCSUPPORT_UBOOT_64BIT),1)`` 决定是否打开
-``INIT_UNUSED_NS_EL2``，漏传就会让 BL31 改写一组 EL2 寄存器。
-
 上面这些检查在 CI 中分两道执行：仓库内的部分在安装工具链之前跑
 （秒级失败），涉及 TF-A 的部分在 TF-A 树就绪后跑。
 
