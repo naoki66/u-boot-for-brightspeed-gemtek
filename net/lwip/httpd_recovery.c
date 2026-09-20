@@ -3475,6 +3475,18 @@ int fs_open_custom(struct fs_file *file, const char *name)
     else if (!strcmp(p, "backup/dsd.bin")) {
 	return recovery_open_mtd_backup(file, "dsd", "dsd-2m.bin");
     }
+    else if (!strcmp(p, "backup/uboot.bin")) {
+	/*
+	 * The boot chain lives in mtd0 and is not reproducible from any other
+	 * backup: uenv/dsd/ubi copies carry no BL2, BL31, U-Boot or
+	 * certificates, and the vendor BL2 is what a return to the stock
+	 * firmware needs.  Reads are non-destructive, so this is offered over
+	 * HTTP even though *writing* mtd0 stays on the Update U-Boot tab and
+	 * the serial TFTP path.
+	 */
+	return recovery_open_mtd_backup(file, "bootloader",
+					"mtd0-bootloader-2m.bin");
+    }
     /* Do not intercept favicon/index/ok/fail: served by fsdata */
     /* let fsdata handle others */
     return 0;
