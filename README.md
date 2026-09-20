@@ -113,6 +113,13 @@ signed mtd0/FIP。
 > `mtd0` 的正确长度是 `0x200000`，即 2 MiB。使用其他擦写长度会越过
 > 工厂校准分区（`uenv`、`dsd`），破坏系统区域，导致系统异常、无 MAC、校准文件丢失等。
 
+> [!NOTE]
+> Web Recovery 的 **Update U-Boot** 目标在上传 `mtd0-signed.bin` 时会**先扫这
+> 2 MiB 的 16 个擦除块**：有坏块就直接拒绝，且一个字节都不擦。启动链在 mtd0 里
+> 是线性读取的，先擦后写在坏块上失败会留下"擦了一半的启动链"，那种状态只能拆
+> NAND 编程器。串口 `run tftp_flash` **没有**这道预检（`mtd write` 遇坏块会静默
+> 跳过并前移载荷），走之前先 `mtd bad bootloader` 确认无坏块。
+
 <p align="right"><a href="#top"><b>↑ 返回顶部</b></a></p>
 
 ## ⚡ TTL/TFTP 刷入
