@@ -18,10 +18,23 @@ from pathlib import Path
 
 
 def replace_once(path: Path, old: str, new: str) -> None:
-    text = path.read_text(encoding="utf-8")
-    if text.count(old) != 1:
+    """Rewrite exactly one occurrence, leaving the rest of the file byte-identical.
+
+    Reading and writing through ``read_text``/``write_text`` would run the
+    text through newline translation: on Windows that silently converts every
+    line of a 90 KB vendor source from LF to CRLF, so the patched tree no
+    longer matches the pinned tree except for the intended line and any diff
+    taken against it is unreadable. Work on bytes and match with the file's
+    own line ending instead.
+    """
+    raw = path.read_bytes()
+    text = raw.decode("utf-8")
+    nl = "\r\n" if "\r\n" in text else "\n"
+    old_native = old.replace("\n", nl)
+    new_native = new.replace("\n", nl)
+    if text.count(old_native) != 1:
         raise SystemExit(f"unexpected source content: {path}")
-    path.write_text(text.replace(old, new), encoding="utf-8")
+    path.write_bytes(text.replace(old_native, new_native).encode("utf-8"))
 
 
 def main() -> None:
