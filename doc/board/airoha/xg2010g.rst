@@ -756,8 +756,12 @@ bootloader 分区越界处并被拒绝（``mtd read`` 会先报
      （``factory`` / ``dsd`` / ``PON`` / ``BOSA``），且**不可恢复**；
    * 写坏 ``bootloader`` 会让设备只能走 X 模式或 NAND 编程器。
 
-   所以：**写入前先用 Web Recovery 的“备份”页把 ``uenv`` / ``dsd`` 和整片
-   flash 下载到电脑**，并记录 ``mtd list`` 输出。
+   所以：**写入前先用 Web Recovery 备份页把 ``bootloader``（mtd0）、
+   ``uenv`` 和 ``dsd`` 下载到电脑**，并记录 ``mtd list`` 输出。网页只提供这
+   三个 2 MiB 分区。``bootloader`` 里是完整启动链（BL2、BL31、本仓库
+   U-Boot 及证书，位于原厂前导区之后），**无法由 ``uenv`` / ``dsd`` / UBI
+   备份重建**，因此它是回原厂时必须先留下的那一个。``ubi`` 分区（440 MiB）
+   网页不提供下载，需要时用串口 ``mtd read`` 分段读出。
 
 每个助手在**写完都会读回比对**：``mtd read``（或 ``ubi read``）到
 ``${tftpverify_addr}`` 后 ``cmp.b`` 源缓冲，一致才打印
@@ -885,6 +889,28 @@ FIP 流程封装，不能直接当作完整 mtd0 写入。
 将 FIP 放入 mtd0 时，还要确认原厂镜像的前导数据、FIP 在 mtd0 中的偏移、
 NAND 坏块处理和 BootROM 的复制规则。建议先通过串口验证 U-Boot 能识别
 NAND 和分区，再在 Linux 中确认 ``cat /proc/mtd`` 的边界与本 DTS 一致。
+
+分区布局虽然只在设备树里描述一次，但却被四处独立引用：设备树的
+``fixed-partitions``、板级 ``XG2010G_UBI_*`` 几何常量、TFTP 救援环境里的
+尺寸断言、以及 CI 的 mtd0 镜像几何。另外 pinned TF-A 里的
+``PLAT_ECNT_FIP_OFFSET`` / ``PLAT_ECNT_FIP_MAX_SIZE`` 决定了 BL23 会从 mtd0
+的哪个偏移读多长的 FIP，因此 ``bootloader`` 分区必须能装下这个窗口。
+``scripts/ci/check-partition-layout.py`` 把这些来源放在一起对拍：
+
+.. code-block:: console
+
+   python3 scripts/ci/check-partition-layout.py --board xg2010g
+   python3 scripts/ci/check-partition-layout.py --board xg2010g \
+       --atf-dir <tf-a 源码树> --require-atf
+
+第二条命令需要 TF-A 源码树（CI 中是 ``trusted-firmware-a-build``），会额外
+校验 FIP 窗口、偏移和最大长度在 workflow 与 TF-A 之间一致，并在
+``board/airoha/xg2010g/atf/build-atf.sh`` 不再定义
+``ECNT_NAND_FIP_IN_BOOT_PARTITION`` 时报错：那会让 BL23 改为从 UBI 卷
+``fip`` 读取第二阶段 FIP，而该路径把 UBI 定位在 ``UBI_START_ADDR``（TF-A
+默认 ``0x20000``，可用 ``OVERRIDE_UBI_START_ADDR`` 覆盖），与本布局的
+``ubi@0x600000`` 不兼容。上面这些检查在 CI 中分两道执行：仓库内的部分在
+安装工具链之前跑（秒级失败），涉及 TF-A 的部分在 TF-A 树就绪后跑。
 
 XR1710G 差异
 ------------
