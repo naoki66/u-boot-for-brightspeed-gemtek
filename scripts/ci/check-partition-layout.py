@@ -191,6 +191,24 @@ def parse_int(text: str) -> int:
     return int(text, 0)
 
 
+def is_power_of_two(value: int) -> bool:
+    """Mirror fiptool's ``is_power_of_2()``, where zero is *not* a power of two.
+
+    ``tools/fiptool/fiptool.c`` in the pinned TF-A tree parses ``--align`` with::
+
+        align = strtoul(arg, &endptr, 0);
+        if (*endptr != '\\0' || !is_power_of_2(align) || errno != 0)
+            log_errx("Invalid alignment: %s", arg);
+
+    and defines ``is_power_of_2(x)`` as ``x && !(x & (x - 1))``. So a value
+    like ``0x300`` is rejected outright. Note that ``strtoul`` with base 0 makes
+    a leading ``0`` mean octal, which is also what the shell's ``$(( ))`` does,
+    so the workflow's own coercion agrees with fiptool and the two can share
+    this predicate.
+    """
+    return value > 0 and (value & (value - 1)) == 0
+
+
 # ---------------------------------------------------------------------------
 # 1. DTS fixed-partitions -- the anchor table
 # ---------------------------------------------------------------------------
@@ -546,6 +564,7 @@ def parse_workflow_env(path: Path, result: CheckResult) -> dict[str, int]:
     wanted = (
         "DEFAULT_MTD0_SIZE",
         "DEFAULT_FIP_OFFSET",
+        "DEFAULT_FIP_ALIGN",
         "BL23_FIP_MAX_SIZE",
         "BL2_XMODEM_MAX_SIZE",
     )
@@ -580,6 +599,26 @@ def check_workflow(
                 f"BL2_XMODEM_MAX_SIZE = 0x{wf['BL2_XMODEM_MAX_SIZE']:x} does not "
                 f"leave room in the 0x{bl2_stage:x} BL2 staging window",
             )
+    if "DEFAULT_FIP_ALIGN" in wf and not is_power_of_two(wf["DEFAULT_FIP_ALIGN"]):
+        # fiptool's get_image_align() rejects a non-power-of-two --align while
+        # packing, which is far too late: it runs after the full U-Boot and
+        # TF-A build. Validate the committed default here so the seconds-level
+        # gate catches it, locally as well as in CI.
+        #
+        # The value that actually reaches --align is the per-board
+        # ${BOARD_UPPER}_FIP_ALIGN variable, which lives in the repository's
+        # GitHub settings rather than in the tree and therefore cannot be read
+        # from here. Passing that resolved value in as a parameter would be
+        # dead code, because the build-mtd0 "Resolve per-board identifiers and
+        # parameters" step already rejects it with the same predicate before
+        # this gate runs. The two checks are complementary: this one owns the
+        # committed default, that one owns the variable.
+        result.fail(
+            "workflow",
+            f"DEFAULT_FIP_ALIGN = 0x{wf['DEFAULT_FIP_ALIGN']:x} is not a power "
+            f"of two; fiptool aborts with \"Invalid alignment\" while packing "
+            f"the FIP, after the whole U-Boot and TF-A chain has been built",
+        )
 
 
 # ---------------------------------------------------------------------------

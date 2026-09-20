@@ -247,7 +247,28 @@ jobs:
             exit 1
           fi
           if (( fip_align_dec < 1 )); then
-            echo "Invalid FIP alignment ${fip_align}" >&2
+            echo "${board_upper}_FIP_ALIGN must be a positive integer, got" \
+              "${fip_align}" >&2
+            exit 1
+          fi
+          # fiptool accepts only a power of two here: get_image_align() in the
+          # pinned tree rejects anything else with "Invalid alignment". That
+          # check fires from inside the FIP packing step, so without this copy
+          # a typo such as 0x300 would not surface until the whole U-Boot and
+          # TF-A chain had been built. The seconds-level repository gate cannot
+          # cover this value, because it comes from the
+          # ${BOARD_UPPER}_FIP_ALIGN variable rather than from the tree; that
+          # gate validates the committed DEFAULT_FIP_ALIGN instead, so the two
+          # are complementary and neither is redundant.
+          #
+          # The parentheses around the mask are load-bearing. bash, like C,
+          # binds != tighter than &, so `fip_align_dec & (fip_align_dec - 1)
+          # != 0` parses as `fip_align_dec & (0|1)` and would quietly turn
+          # 0x300 into 0 -- accepting exactly the value this check exists to
+          # reject.
+          if (( (fip_align_dec & (fip_align_dec - 1)) != 0 )); then
+            echo "${board_upper}_FIP_ALIGN must be a power of two, got" \
+              "${fip_align}; fiptool would reject it" >&2
             exit 1
           fi
 
