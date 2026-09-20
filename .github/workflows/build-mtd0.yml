@@ -361,18 +361,36 @@ jobs:
       # code that parses it. PLAT=fvp only selects a platform for the host
       # tools' build system; nothing target-specific is compiled here.
       #
-      # TRUSTED_BOARD_BOOT=0 is required, not cosmetic. The Airoha port flips
-      # this default to 1 (upstream v2.15.0 ships 0), and Arm's
-      # plat/arm/board/common/board_common.mk insists on ARM_ROTPK_LOCATION
-      # whenever it is on - a knob neither tree gives a default. Our own
-      # PLAT=en7523 never includes that file, so this only bites the
-      # PLAT=fvp vehicle used to reach the two host-tool targets.
-      # Neither tool's source depends on the switch, so the binaries are
-      # unaffected.
+      # The three overrides below are required, not cosmetic. Airoha's
+      # make_helpers/defaults.mk flips nine defaults away from upstream v2.15.0
+      # (0/none -> 1/aes_gcm) because its own PLAT=en7523 enables Trusted Board
+      # Boot, and Arm's plat/arm/** makefiles assert on them:
+      #   TRUSTED_BOARD_BOOT=0    - board_common.mk:14 gates its whole
+      #     ARM_ROTPK_LOCATION block on this; at the tree's value of 1 every
+      #     PLAT=fvp build dies with "Unsupported ARM_ROTPK_LOCATION value",
+      #     since neither tree gives that knob a default.
+      #   DECRYPTION_SUPPORT=none - constraints.mk:284 rejects any other value
+      #     once TRUSTED_BOARD_BOOT is 0.
+      #   DYN_DISABLE_AUTH=0      - constraints.mk:206 rejects 1 once
+      #     TRUSTED_BOARD_BOOT is 0. fvp's platform.mk only sets it when
+      #     TRUSTED_BOARD_BOOT=1, but the tree's defaults.mk sets it outright.
+      # Re-diff make_helpers/defaults.mk against upstream whenever the pinned
+      # ref is bumped; those nine flips are the place this coupling lives.
+      #
+      # Neither binary changes. No file under tools/ mentions any of the three,
+      # and cert_create builds with USE_TBBR_DEFS=1, which its own tbbr.mk
+      # documents as "cert_tool is platform-independent" - it compiles only
+      # src/*.c and src/tbbr/*.c and never opens plat/arm/**.
+      #
+      # PLAT=en7523 never includes plat/arm/**, so the firmware build is
+      # untouched by all of this; and for firmware the two Airoha trees agree
+      # on the value of every one of those nine flips, so nothing we validated
+      # before the switch moved.
       - name: Build fiptool and cert_create
         run: |
           set -euo pipefail
-          make -C trusted-firmware-a PLAT=fvp TRUSTED_BOARD_BOOT=0 \
+          make -C trusted-firmware-a PLAT=fvp \
+            TRUSTED_BOARD_BOOT=0 DECRYPTION_SUPPORT=none DYN_DISABLE_AUTH=0 \
             fiptool certtool -j"$(nproc)"
           test -x trusted-firmware-a/tools/fiptool/fiptool
           test -x trusted-firmware-a/tools/cert_create/cert_create
