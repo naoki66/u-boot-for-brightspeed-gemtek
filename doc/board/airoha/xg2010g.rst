@@ -40,9 +40,9 @@ FIP，而不是只有 BL33 的裸 U-Boot。
 BL2、BL31 和签名材料
 --------------------
 
-BL2 负责早期硬件与 DDR 初始化，BL31 提供 EL3 运行时环境。本项目使用固定版本
-的 TF-A ``v2.10``、Airoha AN7581 overlay、Mbed TLS 和 Arm GNU Toolchain
-从源码构建这两个阶段：
+BL2 负责早期硬件与 DDR 初始化，BL31 提供 EL3 运行时环境。本项目使用固定版本的
+Airoha TF-A 树（``Yuzhii0718/atf-airoha``，v2.15.0 基线）、Mbed TLS 和
+Arm GNU Toolchain 从源码构建这两个阶段：
 
 * BL21、BL22、BL23 分三次编译，再与 NAND flash table 组装为 BL2；
 * BL31 编译后使用 Airoha 兼容的 LZMA 4.65 格式压缩；
@@ -478,15 +478,15 @@ artifact：
    gh variable set XG2010G_FIP_OFFSET --repo naoki66/u-boot-for-brightspeed-gemtek --body 0x800
    gh variable set XG2010G_FIP_ALIGN --repo naoki66/u-boot-for-brightspeed-gemtek --body 0x400
 
-TF-A 工具版本固定在 workflow 内的 ``FIXED_TFA_REF=v2.13.0``，用于构建
-``fiptool`` 和 ``cert_create``。手动运行 Actions 时不再提供 TF-A ref 输入，
-也**不再读取 ``XG2010G_TFA_REF`` 这类板级 TFA 变量**，避免误填不同 TF-A
-版本导致 FIP/证书产物不可复现。如确实需要自定义 TFA 源，请直接 fork
-workflow 并修改 ``FIXED_TFA_REF``。
+整条 TF-A 链路固定在同一棵树：workflow 内的 ``ATF_REF``
+（``Yuzhii0718/atf-airoha``，v2.15.0）同时提供 BL2、BL31、``fiptool`` 和
+``cert_create``，因此写 FIP 的工具与解析 FIP 的代码不会版本错配。手动运行
+Actions 时不再提供 TF-A ref 输入，也**不再读取 ``XG2010G_TFA_REF`` 这类板级
+TFA 变量**，避免误填不同 TF-A 版本导致 FIP/证书产物不可复现。如确实需要
+自定义 TFA 源，请直接 fork workflow 并修改 ``ATF_REF``。
 
-BL2/BL31 使用 TF-A ``v2.10`` 基线、Airoha overlay
-``94892b9e42eb1f6992e60bce904c3ef42ea995c8`` 和 Mbed TLS
-``72718dd87e087215ce9155a826ee5a66cfbe9631`` 构建。
+Mbed TLS 固定为 3.6.6（``0bebf8b8c7f07abe3571ded48a11aa907a1ffb20``）。
+该树使用只在 3.6 及以后存在的 PSA 配置头，3.4.x 无法编译。
 
 默认构建只需要设置签名私钥 Secret（XR1710G 同理，对应
 ``XR1710G_TB_PRIVATE_KEY``）：
@@ -903,13 +903,16 @@ NAND 和分区，再在 Linux 中确认 ``cat /proc/mtd`` 的边界与本 DTS �
    python3 scripts/ci/check-partition-layout.py --board xg2010g \
        --atf-dir <tf-a 源码树> --require-atf
 
-第二条命令需要 TF-A 源码树（CI 中是 ``trusted-firmware-a-build``），会额外
-校验 FIP 窗口、偏移和最大长度在 workflow 与 TF-A 之间一致，并在
-``board/airoha/xg2010g/atf/build-atf.sh`` 不再定义
-``ECNT_NAND_FIP_IN_BOOT_PARTITION`` 时报错：那会让 BL23 改为从 UBI 卷
+第二条命令需要 Airoha TF-A 源码树（CI 中是 ``trusted-firmware-a``），会额外
+校验 FIP 窗口、偏移和最大长度在 workflow 与 TF-A 之间一致，并检查
+``board/airoha/xg2010g/atf/build-atf.sh`` 的两个开关：一旦它定义
+``TCSUPPORT_UBI_SUPPORT`` 就报错，因为那会让 ``plat_ecnt_io_setup()`` 用
+``fip_ubi_policy`` 覆盖无条件的 ``fip_memmap_policy``，BL23 改从 UBI 卷
 ``fip`` 读取第二阶段 FIP，而该路径把 UBI 定位在 ``UBI_START_ADDR``（TF-A
 默认 ``0x20000``，可用 ``OVERRIDE_UBI_START_ADDR`` 覆盖），与本布局的
-``ubi@0x600000`` 不兼容。上面这些检查在 CI 中分两道执行：仓库内的部分在
+``ubi@0x600000`` 不兼容；同时要求它保留 ``TCSUPPORT_EMMC=1``，那是
+``bl2_image_load_v2.c`` 中 memmap/XMODEM 救援路径唯一的编译开关
+（本板没有 eMMC）。上面这些检查在 CI 中分两道执行：仓库内的部分在
 安装工具链之前跑（秒级失败），涉及 TF-A 的部分在 TF-A 树就绪后跑。
 
 XR1710G 差异

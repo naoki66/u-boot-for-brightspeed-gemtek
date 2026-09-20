@@ -31,10 +31,21 @@ tree, not in this repository:
     (``fip_ubi_policy``, volume name hard-coded to ``fip``). That path locates
     the UBI partition at ``UBI_START_ADDR``, which defaults to ``0x20000`` --
     incompatible with this repository's layout, where ``ubi`` starts at
-    ``0x600000``. ``board/airoha/xg2010g/atf/build-atf.sh`` opts out of it by
-    defining ``ECNT_NAND_FIP_IN_BOOT_PARTITION``. Check ``ubi-start-vs-atf``
-    below makes that opt-out load-bearing: flipping it back without moving
-    ``ubi`` is caught here instead of on a bricked board.
+    ``0x600000``.
+
+    ``plat_ecnt_io_setup()`` assigns ``fip_memmap_policy`` unconditionally and
+    only overwrites it with ``fip_ubi_policy`` under ``TCSUPPORT_UBI_SUPPORT``,
+    so the mtd0 path is the default and the UBI path is the opt-in. The v2.15
+    Makefile provides no ``add_define`` for that macro, so it can only reach
+    the compiler through ``BSP_CFLAGS``; ``build-atf.sh`` passes no
+    ``BSP_CFLAGS`` at all. Load-bearing checks ``fip-flag-vs-layout`` and
+    ``xmodem-vs-atf`` below keep it that way.
+  * ``build-atf.sh`` must keep ``TCSUPPORT_EMMC=1``. ``bl2_image_load_v2.c``
+    gates the memmap/XMODEM rescue path (``bl2_mem_params_backup()``,
+    ``plat_ecnt_io_switch_to_memmap()``, ``fip_image_xmodem_load()``) and the
+    matching stubs in ``ecnt_bl2_mem_params_desc.c`` on
+    ``TCSUPPORT_UBI_SUPPORT || TCSUPPORT_EMMC``. These boards have no eMMC; the
+    switch is purely the key that keeps the serial recovery path compiled in.
 
 Note what is deliberately *not* checked: the ``flash_table.bin`` that
 ``spi_nand_flash_table.c`` emits is a NAND *device* table (manufacturer/device
@@ -46,7 +57,7 @@ Run from the repo root, once per board:
 
     python3 scripts/ci/check-partition-layout.py --board xg2010g
     python3 scripts/ci/check-partition-layout.py --board xg2010g \\
-        --atf-dir trusted-firmware-a-build --require-atf
+        --atf-dir trusted-firmware-a --require-atf
 
 Exits 0 when every check passes, 1 (with a clear message) otherwise.
 """
@@ -120,6 +131,32 @@ def strip_c_comments(text: str) -> str:
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
     text = re.sub(r"//[^\n]*", "", text)
     return text
+
+
+def strip_shell_comments(text: str) -> str:
+    """Drop shell comments so that flag detection reads code, not prose.
+
+    build-atf.sh documents *why* it leaves ``TCSUPPORT_UBI_SUPPORT`` off, so a
+    plain substring search would find the macro in a comment and conclude the
+    opposite. Only an unquoted ``#`` that starts a word begins a comment.
+    """
+    out_lines: list[str] = []
+    for line in text.splitlines():
+        quote = ""
+        cut = len(line)
+        for i, ch in enumerate(line):
+            if quote:
+                if ch == quote:
+                    quote = ""
+                continue
+            if ch in "'\"":
+                quote = ch
+                continue
+            if ch == "#" and (i == 0 or line[i - 1] in " \t"):
+                cut = i
+                break
+        out_lines.append(line[:cut])
+    return "\n".join(out_lines)
 
 
 def parse_int(text: str) -> int:
@@ -573,12 +610,24 @@ def parse_atf(path: Path, result: CheckResult) -> dict[str, int]:
     return out
 
 
-def atf_build_defines_fip_in_boot_partition(result: CheckResult) -> bool:
+def atf_build_flags(result: CheckResult) -> dict[str, bool]:
+    """Read the load-bearing switches out of build-atf.sh.
+
+    ``ubi`` must stay False: defining ``TCSUPPORT_UBI_SUPPORT`` (as a make
+    variable or through ``-D``) makes ``plat_ecnt_io_setup()`` replace the
+    unconditional ``fip_memmap_policy`` with ``fip_ubi_policy`` and BL23 then
+    looks for the FIP in the UBI volume ``fip``. ``emmc`` must stay True: it is
+    the only thing that keeps the XMODEM rescue path compiled in, since the
+    boards have no eMMC.
+    """
     if not ATF_BUILD.exists():
         result.fail("atf-mode", f"{ATF_BUILD} not found")
-        return False
-    text = ATF_BUILD.read_text(encoding="utf-8")
-    return "ECNT_NAND_FIP_IN_BOOT_PARTITION" in text
+        return {"ubi": False, "emmc": False}
+    code = strip_shell_comments(ATF_BUILD.read_text(encoding="utf-8"))
+    return {
+        "ubi": "TCSUPPORT_UBI_SUPPORT" in code,
+        "emmc": bool(re.search(r"TCSUPPORT_EMMC\s*=\s*1", code)),
+    }
 
 
 def check_atf(
@@ -586,7 +635,7 @@ def check_atf(
     atf: dict[str, int],
     wf: dict[str, int],
     parts: list[Part],
-    ubi_in_boot_partition: bool,
+    flags: dict[str, bool],
     atf_available: bool,
 ) -> None:
     bootloader = part_by_label(parts, "bootloader")
@@ -625,25 +674,38 @@ def check_atf(
                 f"after the maximum FIP BL23 can read"
             )
 
+    if not flags["emmc"]:
+        result.fail(
+            "xmodem-vs-atf",
+            "build-atf.sh no longer sets TCSUPPORT_EMMC=1. bl2_image_load_v2.c "
+            "gates bl2_mem_params_backup(), plat_ecnt_io_switch_to_memmap() and "
+            "fip_image_xmodem_load() on (TCSUPPORT_UBI_SUPPORT || "
+            "TCSUPPORT_EMMC); without either macro a damaged FIP can only be "
+            "recovered by an external programmer. These boards have no eMMC, "
+            "so the flag is purely the key for the serial recovery path",
+        )
+
+    # Both load-bearing checks below are properties of this repository, not of
+    # the ATF checkout, so they fire in the cheap gate too. The UBI_START_ADDR
+    # value from the ATF tree only improves the message.
     if ubi is None:
         return
     start = atf.get("ubi_start_default")
-    if start is None:
-        return
-    if ubi_in_boot_partition:
-        if ubi.start == start:
-            result.note(
-                f"ubi starts at ATF's default UBI_START_ADDR (0x{start:x}) "
-                f"although the build selects the mtd0 FIP path; harmless today"
-            )
-    elif ubi.start != start:
+    if flags["ubi"]:
+        where = (
+            f"UBI_START_ADDR 0x{start:x}" if start is not None else "its UBI_START_ADDR"
+        )
         result.fail(
-            "ubi-start-vs-atf",
-            f"build-atf.sh no longer defines ECNT_NAND_FIP_IN_BOOT_PARTITION, so "
-            f"BL23 would load the FIP from the UBI volume 'fip' starting at "
-            f"UBI_START_ADDR 0x{start:x}, but this layout puts ubi at "
-            f"0x{ubi.start:x}. Either restore the define or set "
-            f"OVERRIDE_UBI_START_ADDR=0x{ubi.start:x}",
+            "fip-flag-vs-layout",
+            f"build-atf.sh defines TCSUPPORT_UBI_SUPPORT, so BL23 would switch "
+            f"to fip_ubi_policy and look for the FIP in the UBI volume 'fip' at "
+            f"{where}, but this layout puts ubi at 0x{ubi.start:x}. Drop the "
+            f"flag, or set OVERRIDE_UBI_START_ADDR=0x{ubi.start:x} in the same tree",
+        )
+    elif start is not None and ubi.start == start:
+        result.note(
+            f"ubi starts at ATF's default UBI_START_ADDR (0x{start:x}) "
+            f"although the build selects the mtd0 FIP path; harmless today"
         )
 
 
@@ -675,7 +737,7 @@ def check_board(board: str, atf_dir: Path | None, require_atf: bool) -> CheckRes
     wf = parse_workflow_env(WORKFLOW, result)
     check_workflow(result, wf, parts)
 
-    in_boot_partition = atf_build_defines_fip_in_boot_partition(result)
+    flags = atf_build_flags(result)
     atf: dict[str, int] = {}
     if atf_dir is not None:
         atf = parse_atf(atf_dir, result)
@@ -704,7 +766,7 @@ def check_board(board: str, atf_dir: Path | None, require_atf: bool) -> CheckRes
                     f"{wf['DEFAULT_FIP_OFFSET'] + fallback_window:x}",
                 )
 
-    check_atf(result, atf, wf, parts, in_boot_partition, bool(atf))
+    check_atf(result, atf, wf, parts, flags, bool(atf))
     return result
 
 
