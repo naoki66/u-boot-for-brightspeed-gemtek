@@ -113,6 +113,13 @@ signed mtd0/FIP。
 > `mtd0` 的正确长度是 `0x200000`，即 2 MiB。使用其他擦写长度会越过
 > 工厂校准分区（`uenv`、`dsd`），破坏系统区域，导致系统异常、无 MAC、校准文件丢失等。
 
+> [!NOTE]
+> Web Recovery 的 **Update U-Boot** 目标在上传 `mtd0-signed.bin` 时会**先扫这
+> 2 MiB 的 16 个擦除块**：有坏块就直接拒绝，且一个字节都不擦。启动链在 mtd0 里
+> 是线性读取的，先擦后写在坏块上失败会留下"擦了一半的启动链"，那种状态只能拆
+> NAND 编程器。串口 `run tftp_flash` **没有**这道预检（`mtd write` 遇坏块会静默
+> 跳过并前移载荷），走之前先 `mtd bad bootloader` 确认无坏块。
+
 <p align="right"><a href="#top"><b>↑ 返回顶部</b></a></p>
 
 ## ⚡ TTL/TFTP 刷入
@@ -162,9 +169,11 @@ X 模式加载临时引导。
     > 分区已保存 `ipaddr`，U-Boot 会沿用该地址；请以串口打印的
     > `recovery network: eth0/gdm1 1G switch port only, http://<addr>/` 为准，
     > 或先 `setenv ipaddr 192.168.0.1` 再重试。
-12. 选择系统镜像 `ubi-squashfs-sysupgrade.itb`；`BL2` 选择
-    `<board>-...-ubi-preloader.bin`，`U-Boot` 选择
-    `<board>-...-ubi-bl31-uboot.fip`。
+12. 在恢复页上传。左侧三个目标共用一个文件选择框：`Firmware Recovery` 选
+    `ubi-squashfs-sysupgrade.itb`；`Update U-Boot` 选 `<board>-...-mtd0-signed.bin`
+    （**必须正好 2 MiB**）。`Update U-Boot` **没有单独的 BL2 字段**，也不接受裸文件
+    ——mtd0 是"0x800 前导区 + 一个合并 FIP"的整体，BL2、BL31/BL33 与证书都在同一个
+    FIP 里；上传 `u-boot.bin`、裸 `.fip` 或 `ubi-preloader.bin` 都会被后端拒绝。
 13. 等待数分钟完成刷写，之后务必断电重启设备。
 
 > [!TIP]
@@ -210,16 +219,20 @@ run tftp_flash          # 完整 2 MiB mtd0 -> bootloader 分区
 | 助手 | 作用 |
 | --- | --- |
 | `run tftp_flash` | 写完整 2 MiB `mtd0` 到 `bootloader` 分区 |
-| `run tftp_flash_bl2` | 写 `preloader.bin` 这类自带 0x800 前导区的镜像（暂存区先填 0xFF，文件放 `+0x800`，同原厂做法） |
 | `run tftp_flash_fit` | 把系统固件写进 UBI 的 `fit` 卷 |
 | `run tftp_flash_uenv` / `run tftp_flash_dsd` | 恢复 2 MiB 出厂校准分区 |
 | `run tftp_flash_manual` | **手动指定地址**：写 `${tftpboot_file}` 到 `${tftpboot_part}` 偏移 `${tftpboot_ofs}`、长度 `${tftpboot_len}` |
+
+**没有"只刷 BL2"的助手**：mtd0 里的启动链是一个跨约 3.6 个擦除块的合并 FIP，
+只写前 `0x20000` 会丢掉 BL31/BL33，得到一台既不启动、也回不到串口 X 模式的设备。
+原厂能这么做是因为它的第二级在另一块区域，本布局不行——整块 mtd0 走
+`run tftp_flash`。
 
 **每个助手写完都会读回比对**（`mtd read` + `cmp.b`），一致才报
 `written and read-back verified.`，不一致直接报 `FAILED`。这一步不能省：NAND
 写入失败或碰到坏块时，不读回就"看起来成功"，而镜像其实不能启动。
 
-`run boot_menu` 打开启动菜单（Boot system / Web recovery / 三条 TFTP 刷写 /
+`run boot_menu` 打开启动菜单（Boot system / Web recovery / 两条 TFTP 刷写 /
 手动写入 / 存储信息 / 环境变量 / 重启）。默认 `bootcmd` **不变**，仍是
 `run boot_ubi || http_recovery`，所以无人值守开机照常启动、失败照常落到 Web
 Recovery；菜单只是让这些助手随时可用。
@@ -247,7 +260,7 @@ TFTP 传输和 Web Recovery 的上传缓冲互相踩内存。
 | `<board>-...-mtd0-signed.bin` | 完整 2 MiB `/dev/mtd0` bootloader 镜像，用于替换 `bootloader` 分区 |
 | `<board>-...-fip-signed.bin` | signed FIP 本体，位于完整 mtd0 镜像的 `0x800` 偏移 |
 | `<board>-...-ubi-preloader.bin` | 包含 BL2 和 `tb-fw-cert` 的 signed FIP，用于 X 模式第一段 XMODEM |
-| `<board>-...-ubi-bl31-uboot.fip` | BL31 + U-Boot/BL33 FIP，用于 X 模式第二段 XMODEM 和 Web Recovery |
+| `<board>-...-ubi-bl31-uboot.fip` | BL31 + U-Boot/BL33 FIP，用于 X 模式第二段 XMODEM |
 | `<board>-...-bootext-bl2.bin` | BootROM X 模式应急垫片（`mtd0-prefix.bin` + 本仓库编译的 BL2，**未真机验证**） |
 | `<board>-...-bl31.bin` | 源码构建的 BL31 Airoha LZMA 固件，便于核对和离线调试 |
 | `<board>-...-u-boot-raw.bin` | 裸 U-Boot/BL33，仅供调试分析 |
@@ -266,7 +279,7 @@ CertUtil -hashfile <board>-...-mtd0-signed.bin SHA256
 
 > [!IMPORTANT]
 > 只有 `<board>-...-mtd0-signed.bin` 是完整 2 MiB `mtd0` 签名镜像。其它裸文件或
-> FIP 文件用于救砖、调试或 Web Recovery，不要当作完整 `mtd0` 直接写入
+> FIP 文件用于 X 模式 XMODEM 救砖或离线调试，不要当作完整 `mtd0` 直接写入
 > `0x00000000`。
 
 <p align="right"><a href="#top"><b>↑ 返回顶部</b></a></p>

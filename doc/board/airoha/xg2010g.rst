@@ -419,6 +419,25 @@ bootloader 只允许在明确验证 FIP、签名、BL2/BL31 兼容性后替换
 工厂校准分区 ``uenv`` 的 ``0x00200000-0x00400000`` 和 ``dsd`` 的
 ``0x00400000-0x00600000`` 原样不变。``reserved_bmt`` 也不得写入。
 
+写 ``bootloader``（``mtd0``）时，U-Boot 的恢复服务会**先扫这 2 MiB 里的 16 个
+擦除块**，只要有一个坏块就直接拒绝，并且**一个字节都不擦**。这道预检必须在擦除
+之前：启动链在 mtd0 里由 BootROM 和 BL2 **线性读取**，两者都不跳过坏块，所以
+一旦"先擦、后写在坏块处失败"，留下的就是一段被擦掉一半的启动链——``mtd0+0``
+看起来仍然可启动，BootROM 会去启动然后挂住，不会回落到串口 X 模式，只能拆
+NAND 编程器。
+
+串口那条 ``run tftp_flash`` **没有这道预检**，而且比"没有预检"更隐蔽：``mtd
+write``（``cmd/mtd.c`` 的 ``mtd_io()``）遇到坏块既不报错也不提示，**直接跳过**，
+后面的载荷因此整体前移一个擦除块，写到最后一个块时越界失败。助手的读回比对会
+把这次错误报成 ``FAILED``（``cmd/mtd.c`` 里另一处 ``mtd io`` 的读取同样会跳过
+该块，所以比对必然不一致），但那时 ``mtd erase`` 已经把整个 2 MiB 擦干净了。
+要走 TFTP 之前先自己确认这 16 块全好：
+
+.. code-block:: console
+
+   mtd list                  /* 确认 bootloader 从 0x0 起、大小 0x200000 */
+   mtd bad bootloader        /* 无输出 = 无坏块；有输出就别用 tftp_flash */
+
 U-Boot 配置
 -----------
 
@@ -622,8 +641,10 @@ U-Boot 自带的 TFTP 刷写助手说明了它到底是什么：
 
 X 模式依赖 BootROM 和串口，Web Recovery 依赖 U-Boot 的 lwIP 网络栈。两者都可能
 不可用（网口没起来、镜像已经不能启动、恢复页挂了）。因此在 U-Boot 里再提供一条
-**纯串口 + TFTP** 的写入通道，设计抄自原厂 U-Boot 的
-``boot_tftp_write_bl2`` / ``mtd_write_bl2`` 助手和它的启动菜单。
+**纯串口 + TFTP** 的写入通道：骨架抄自原厂 U-Boot 的 ``boot_tftp_write_bl2`` /
+``mtd_write_bl2`` 助手和它的启动菜单，而**读回比对是本仓库加的**——原厂那两个
+助手写完 ``mtd write`` 就结束，``mtd read`` + ``cmp.b`` 一步是从它的 UBI 助手
+``ubi_verify_fip`` / ``ubi_verify_production`` 抄来的。
 
 默认环境变量（``board/airoha/an7581/xg2010g.env`` 与共用的
 ``include/env/airoha/an7581-tftp.env``）：:
@@ -632,7 +653,6 @@ X 模式依赖 BootROM 和串口，Web Recovery 依赖 U-Boot 的 lwIP 网络栈
     tftpboot_addr=0x90000000        # 暂存区，刻意不用 $loadaddr
     tftpverify_addr=0x94000000      # 读回比对区
     tftpboot_size=0x200000          # 完整 mtd0 镜像长度
-    tftpboot_bl2_size=0x20000       # preloader 写入的擦除区长度
 
 ``tftpboot_addr`` 与 ``$loadaddr`` 分开是有意为之：Web Recovery 的上传缓冲在
 ``recovery_addr``（``0x81800000``），分开可以避免 TFTP 传输和正在进行的 HTTP
@@ -655,10 +675,6 @@ X 模式依赖 BootROM 和串口，Web Recovery 依赖 U-Boot 的 lwIP 网络栈
      - 作用
    * - ``run tftp_flash``
      - 写完整 2 MiB ``mtd0`` 到 ``bootloader`` 分区（自带 0x800 前导区）
-   * - ``run tftp_flash_bl2``
-     - 写 ``preloader.bin`` 这类自带 0x800 前导区的镜像。先用 ``iret`` 把
-       ``0x20000`` 暂存区填 ``0xFF``，把文件放到 ``+0x800``，再整块写入
-       —— 与原厂 ``mw.b $loadaddr 0xff 0x20000`` 完全一致
    * - ``run tftp_flash_fit``
      - 把系统固件写进 UBI 的 ``fit`` 卷
    * - ``run tftp_flash_uenv`` / ``run tftp_flash_dsd``
@@ -666,6 +682,16 @@ X 模式依赖 BootROM 和串口，Web Recovery 依赖 U-Boot 的 lwIP 网络栈
    * - ``run tftp_flash_manual``
      - **手动指定写入地址**：写 ``${tftpboot_file}`` 到 ``${tftpboot_part}`` 的
        偏移 ``${tftpboot_ofs}``，长度 ``${tftpboot_len}``
+
+.. note::
+
+   这里**故意没有"只刷 preloader/BL2"的助手**。原厂 ``mtd_write_bl2`` 只写
+   ``erasesize`` 一块（``0x20000``），在本布局下会丢数据：mtd0 里的启动链是
+   **一个合并 FIP**，实测从 ``0x800`` 一直跨到 ``0x73248``（约 3.6 个擦除块），
+   只写第一块会把 BL31 和 BL33 留在旧内容里——或者更糟，擦掉了却没写回，得到
+   一台既不启动、也回不到串口 X 模式的设备（BootROM 看到 ``mtd0+0`` 还有合理的
+   入口就会去启动然后挂住，不再回落到串口）。原厂能只写一块是因为它的第二级在
+   另一块区域，本布局不行。整块 mtd0 一律走 ``run tftp_flash``。
 
 手动指定地址写入（``tftp_flash_manual``）
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -801,12 +827,11 @@ bootloader 分区越界处并被拒绝（``mtd read`` 会先报
    0  Boot system                     run boot_ubi
    1  Web recovery                    run http_recovery
    2  Flash mtd0 image via TFTP
-   3  Flash BL2/preloader via TFTP
-   4  Flash system firmware via TFTP
-   5  Manual NAND write via TFTP
-   6  Show storage information        mtd list / ubi info l
-   7  Show flash environment          printenv 相关变量
-   8  Reboot                           reset
+   3  Flash system firmware via TFTP
+   4  Manual NAND write via TFTP
+   5  Show storage information        mtd list / ubi info l
+   6  Show flash environment          printenv 相关变量
+   7  Reboot                           reset
 
 菜单是**可选**的：默认 ``bootcmd`` 仍是 ``run boot_ubi || http_recovery``，
 所以无人值守开机时系统照常启动、启动失败照常落到 Web Recovery。菜单只是让这些
@@ -854,8 +879,21 @@ X 模式加载临时引导。该流程需要 TTL 串口和支持 XMODEM 的终�
       地址而不是默认值；此时请以串口打印的
       ``recovery network: eth0/gdm1 1G switch port only, http://<addr>/``
       为准，或先执行 ``setenv ipaddr 192.168.0.1`` 再重试。
-7. 选择 ``ubi-squashfs-sysupgrade.itb``；``BL2`` 选择
-   ``...-ubi-preloader.bin``，``U-Boot`` 选择 ``...-ubi-bl31-uboot.fip``。
+7. 在恢复页上传。左侧有三个目标，页面只有一个文件选择框，按目标选文件：
+
+   * ``Firmware Recovery``：``ubi-squashfs-sysupgrade.itb``；
+   * ``Update U-Boot``：``...-mtd0-signed.bin``，**必须正好 2 MiB**。
+
+   两个目标写的是不同区域（``bootloader`` 分区与 ``ubi`` 分区），互不影响。
+
+   .. warning::
+
+      ``Update U-Boot`` **没有单独的 ``BL2`` 字段**，也不接受裸文件：mtd0 是
+      "``0x800`` 前导区 + 一个合并 FIP"的整体，BL2、BL31/BL33 和证书都在同一个
+      FIP 里。上传 ``u-boot.bin``、裸 ``.fip`` 或 ``...-ubi-preloader.bin`` 都会
+      被后端拒绝，并在串口打印 ``Expected full signed xg2010g-*-mtd0-signed.bin,
+      not u-boot.bin or bare FIP``。
+
 8. 系统固件上传会自动擦除并重建完整 UBI，等待数分钟完成刷写。
 9. 刷写完成后务必断电重启设备。
 
@@ -879,8 +917,8 @@ Recovery，并在串口打印倒计时。中途松开会取消恢复并继续正
 设置为 ``0`` 可恢复为检测到按键后立即进入恢复。
 
 ``bootext.ram`` 属于平台救援链文件，不由本仓库的 U-Boot 编译生成；需要
-保留已验证可用的原厂/平台版本。CI 产物附带自编译的
-``<board>-...-bootext-bl2.bin``（BootROM 加载头 + 本仓库编译的 BL2）作应急
+保留已验证可用的原厂/平台版本。CI 产物附带的
+``<board>-...-bootext-bl2.bin`` 是 BootROM 加载头加本仓库编译的 BL2，作应急
 备份，但未经过真机验证，优先使用已验证的原厂版本。
 
 建议的验证顺序

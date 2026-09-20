@@ -2363,6 +2363,62 @@ static int recovery_mtd_validate_region(struct mtd_info *mtd, loff_t ofs,
 	return 0;
 }
 
+/*
+ * Reject a raw MTD region that contains a bad block.
+ *
+ * recovery_erase_mtd_region() skips bad blocks and
+ * recovery_write_mtd_region() refuses to write across one in strict mode, but
+ * both of those run after the erase has already blanked the whole region.  A
+ * bad block in the bootloader region therefore fails at the worst possible
+ * moment: the old boot chain is gone, the replacement is incomplete, and the
+ * BootROM finds a plausible mtd0+0, tries to boot it and hangs instead of
+ * falling back to the serial X mode.  Reading the bad-block markers first
+ * costs one page read per eraseblock -- 16 of them for the 2 MiB bootloader
+ * partition -- and lets the caller refuse while the existing image is intact.
+ *
+ * This mirrors what the strict write path requires, rather than applying a
+ * weaker rule: a weaker rule would still let the erase happen before the write
+ * discovered that it cannot finish.
+ */
+static int recovery_mtd_require_good_blocks(struct mtd_info *mtd, loff_t ofs,
+					    size_t len)
+{
+	int bad = 0;
+	int ret;
+
+	ret = recovery_mtd_validate_region(mtd, ofs, len);
+	if (ret)
+		return ret;
+
+	for (loff_t addr = 0; addr < len; addr += mtd->erasesize) {
+		ret = mtd_block_isbad(mtd, ofs + addr);
+		if (ret < 0) {
+			printf("Failed to query bad block at 0x%llx: %d\n",
+			       (unsigned long long)(ofs + addr), ret);
+			return ret;
+		}
+		if (ret > 0) {
+			printf("Bad block at 0x%llx on '%s'\n",
+			       (unsigned long long)(ofs + addr), mtd->name);
+			bad++;
+		}
+	}
+
+	if (!bad)
+		return 0;
+
+	printf("Refusing to write '%s': %d bad block%s in 0x%llx..+0x%lx\n",
+	       mtd->name, bad, bad == 1 ? "" : "s",
+	       (unsigned long long)ofs, (unsigned long)len);
+	printf("Nothing was erased; the existing contents are intact.  Erasing "
+	       "first would discard the boot chain, and the replacement could "
+	       "not cross the bad block either -- a device in that state "
+	       "neither boots nor returns to the serial X mode, so recovering "
+	       "it needs a NAND programmer.\n");
+
+	return -EIO;
+}
+
 static void recovery_update_erase_progress(loff_t done)
 {
 	prog_erase_done = done > prog_erase_total ? prog_erase_total : done;
@@ -4043,6 +4099,34 @@ printf("Failed to select UBI %s rebuild target: %d\n",
 		bool verify = current_target == TARGET_UBOOT ||
 			      current_target == TARGET_UENV ||
 			      current_target == TARGET_DSD;
+		/*
+		 * Only the bootloader image has its byte offsets baked into
+		 * the on-flash layout: the BootROM and BL2 read the 2 MiB
+		 * mtd0 linearly and do not skip bad blocks, so one skipped
+		 * eraseblock would shift everything after it by 0x20000 and
+		 * produce an image that looks valid at offset 0 but cannot
+		 * boot.  That makes both the pre-erase scan below and the
+		 * write itself strict, for this target and for no other.
+		 */
+		bool strict_layout = current_target == TARGET_UBOOT;
+
+		/*
+		 * Scan before erasing rather than during the write: by the
+		 * time the strict write gave up on a bad block the erase
+		 * would already have discarded the old boot chain, which is
+		 * the one state this board cannot get out of on its own.
+		 */
+		if (strict_layout) {
+			ret = recovery_mtd_require_good_blocks(mtd, ofs,
+							       target.limit);
+			if (ret) {
+				printf("mtd bad-block pre-check failed: %d\n",
+				       ret);
+				recovery_release_target(&target);
+				prog_phase = -1;
+				return ret;
+			}
+		}
 
 		prog_phase = 1;
 		prog_done = 0;
@@ -4067,11 +4151,8 @@ printf("Failed to select UBI %s rebuild target: %d\n",
 		ret = recovery_write_mtd_region(mtd, ofs, target.limit, image,
 						image_size,
 						verify,
-						/* strict layout: the 2 MiB mtd0
-						 * image is read linearly by the
-						 * BootROM/BL2, so a skipped bad
-						 * block must not shift it. */
-						current_target == TARGET_UBOOT,
+						/* strict layout, see above */
+						strict_layout,
 						status_leds);
 		if (ret) {
 			printf("mtd_write failed: %d\n", ret);
