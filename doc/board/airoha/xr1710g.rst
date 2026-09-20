@@ -110,7 +110,9 @@ GitHub Actions 签名构建
 * ``XR1710G_MTD0_PREFIX_SHA256``（推荐）：前导区 SHA256 校验值。
 * ``XR1710G_MTD0_SIZE``/``XR1710G_FIP_OFFSET``/``XR1710G_FIP_ALIGN``
   /``XR1710G_TFW_NVCTR``/``XR1710G_NTFW_NVCTR``（可选）：非敏感变量，
-  默认值见 workflow 内 ``DEFAULT_*``。
+  默认值见 workflow 内 ``DEFAULT_*``。其中 ``XR1710G_FIP_ALIGN`` 必须是
+  2 的幂且不能为 0，否则构建会在打包 FIP 时被 ``fiptool`` 拒绝；判据与
+  秒级快检门一致，见 :doc:`xg2010g` 的“建议的验证顺序”。
 
 .. warning::
    XG2010G 与 XR1710G 的 mtd0 前导区是 **板级 BootROM 专属** 的字节段，

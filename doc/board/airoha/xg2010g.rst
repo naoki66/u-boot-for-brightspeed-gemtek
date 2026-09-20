@@ -468,7 +468,8 @@ artifact：
      - 原厂 mtd0 中 FIP 起始位置
    * - ``XG2010G_FIP_ALIGN``
      - ``0x400``
-     - FIP payload 对齐，匹配已观察到的原厂 payload 偏移
+     - FIP payload 对齐，匹配已观察到的原厂 payload 偏移。必须是 2 的幂，
+       且不能为 0 —— ``fiptool`` 的 ``get_image_align()`` 不接受别的取值
 
 可以先设置非敏感变量：
 
@@ -962,6 +963,18 @@ NAND 和分区，再在 Linux 中确认 ``cat /proc/mtd`` 的边界与本 DTS �
 
 上面这些检查在 CI 中分两道执行：仓库内的部分在安装工具链之前跑
 （秒级失败），涉及 TF-A 的部分在 TF-A 树就绪后跑。
+
+``XG2010G_FIP_ALIGN`` 是这两类之外的一个，需要两处判据。``fiptool`` 的
+``get_image_align()``（pinned 树的 ``tools/fiptool/fiptool.c``）只接受 2 的
+幂、且不接受 0，否则 ``log_errx("Invalid alignment: ...")`` —— 而它是在打包
+FIP 那一步才抛，也就是整条 U-Boot + TF-A 链编完之后。所以仓库里的默认值
+``DEFAULT_FIP_ALIGN`` 由上面那条命令直接校验（秒级，本地可跑）；而真正生效
+的 GitHub Variable ``XG2010G_FIP_ALIGN`` 不在树里、在这里读不到，只能由
+workflow 里 “Resolve per-board identifiers and parameters” 一步用同一个
+判据在安装工具链之前挡住。判据就是 ``x > 0`` 且 ``x & (x - 1) == 0`` ——
+写 bash 版本时**括号不能省**：bash 和 C 一样让 ``!=`` 比 ``&`` 结合得更紧，
+``fip_align_dec & (fip_align_dec - 1) != 0`` 会被解析成
+``fip_align_dec & (0|1)``，``0x300`` 就静默通过了。
 
 换 TF-A 源码树后的真机验证清单
 ------------------------------
