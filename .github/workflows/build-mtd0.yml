@@ -35,8 +35,11 @@ on:
 
 env:
   ARCH: arm
-  AIROHA_ATF_REF: 94892b9e42eb1f6992e60bce904c3ef42ea995c8
-  ATF_BASE_REF: v2.10
+  # Yuzhii0718/atf-airoha, branch atf-v2.15.0. One tree serves BL2, BL31 and
+  # the host tools, so the tree that defines the FIP format is the same tree
+  # that writes it. This replaces the previous v2.10 base + Ansuel overlay
+  # composition, where the overlay silently won every file it carried.
+  ATF_REF: 6cf15a14d74dcf5abfe9371732d123df746c59a5
   BL2_TOOLCHAIN_NAME: arm-gnu-toolchain-15.3.rel1-x86_64-arm-none-eabi
   BL2_TOOLCHAIN_SHA256: 563bebb2b97d53382b956d6ee1fe61e2cae26699901417234a37df505ef9b5fa
   BL2_TOOLCHAIN_URL: https://gitlab.arm.com/api/v4/projects/tooling%2Fgnu-toolchains-for-arm/packages/generic/gnu-toolchain/15.3.rel1/arm-gnu-toolchain-15.3.rel1-x86_64-arm-none-eabi.tar.xz
@@ -51,11 +54,13 @@ env:
   DEFAULT_MTD0_SIZE: "0x200000"
   DEFAULT_NTFW_NVCTR: "0"
   DEFAULT_TFW_NVCTR: "0"
-  FIXED_TFA_REF: v2.13.0
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   LZMA_SOURCE_SHA256: dcbdb5f4843eff638e4a5e8be0e2486a3c5483df73c70823618db8e66f609ec2
   LZMA_SOURCE_URL: https://sources.openwrt.org/lzma-4.65.tar.bz2
-  MBEDTLS_REF: 72718dd87e087215ce9155a826ee5a66cfbe9631
+  # mbedtls 3.6.6 (annotated tag v3.6.6 peels to this commit). The Airoha tree
+  # builds against the PSA based configuration headers that only exist from
+  # 3.6 onwards, so the previous 3.4.1 pin no longer compiles.
+  MBEDTLS_REF: 0bebf8b8c7f07abe3571ded48a11aa907a1ffb20
   MTD0_FIP_PLAT_TOC_FLAGS: "1"
   # The 0x800 bytes before the FIP are not padding and must not be zero.
   # The vendor bootloader writes the FIP into an erased 2 MiB region
@@ -222,7 +227,7 @@ jobs:
               ;;
           esac
 
-          tfa_ref="$FIXED_TFA_REF"
+          atf_ref="$ATF_REF"
 
           mtd0_size="${mtd0_size:-$DEFAULT_MTD0_SIZE}"
           fip_offset="${fip_offset:-$DEFAULT_FIP_OFFSET}"
@@ -242,12 +247,33 @@ jobs:
             exit 1
           fi
           if (( fip_align_dec < 1 )); then
-            echo "Invalid FIP alignment ${fip_align}" >&2
+            echo "${board_upper}_FIP_ALIGN must be a positive integer, got" \
+              "${fip_align}" >&2
+            exit 1
+          fi
+          # fiptool accepts only a power of two here: get_image_align() in the
+          # pinned tree rejects anything else with "Invalid alignment". That
+          # check fires from inside the FIP packing step, so without this copy
+          # a typo such as 0x300 would not surface until the whole U-Boot and
+          # TF-A chain had been built. The seconds-level repository gate cannot
+          # cover this value, because it comes from the
+          # ${BOARD_UPPER}_FIP_ALIGN variable rather than from the tree; that
+          # gate validates the committed DEFAULT_FIP_ALIGN instead, so the two
+          # are complementary and neither is redundant.
+          #
+          # The parentheses around the mask are load-bearing. bash, like C,
+          # binds != tighter than &, so `fip_align_dec & (fip_align_dec - 1)
+          # != 0` parses as `fip_align_dec & (0|1)` and would quietly turn
+          # 0x300 into 0 -- accepting exactly the value this check exists to
+          # reject.
+          if (( (fip_align_dec & (fip_align_dec - 1)) != 0 )); then
+            echo "${board_upper}_FIP_ALIGN must be a power of two, got" \
+              "${fip_align}; fiptool would reject it" >&2
             exit 1
           fi
 
           {
-            echo "tfa_ref=${tfa_ref}"
+            echo "atf_ref=${atf_ref}"
             echo "mtd0_size=${mtd0_size}"
             echo "mtd0_size_dec=${mtd0_size_dec}"
             echo "fip_offset=${fip_offset}"
@@ -258,11 +284,21 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           echo "Board: ${BOARD} (${board_upper})"
-          echo "TF-A ref: ${tfa_ref} (fixed)"
+          echo "Airoha TF-A ref: ${atf_ref} (pinned)"
           echo "mtd0 size: ${mtd0_size}"
           echo "FIP offset: ${fip_offset}"
           echo "FIP payload alignment: ${fip_align}"
           echo "Signing: required"
+
+      # Cheap repository-only gate: runs before the toolchain install so a
+      # partition edit that contradicts the board geometry or the rescue env
+      # fails in seconds instead of after the full U-Boot build.
+      - name: Check partition layout (repository)
+        env:
+          BOARD: ${{ matrix.board }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/check-partition-layout.py --board "${BOARD}"
 
       - name: Install dependencies
         run: |
@@ -285,7 +321,6 @@ jobs:
             curl \
             git \
             openssl \
-            rsync \
             xz-utils
 
       - name: Configure U-Boot
@@ -335,40 +370,60 @@ jobs:
           fi
           echo "u-boot.bin size: ${uboot_size} bytes"
 
-      - name: Checkout TF-A tooling
+      - name: Checkout Airoha TF-A
         uses: actions/checkout@v7
         with:
-          repository: ARM-software/arm-trusted-firmware
-          ref: ${{ steps.params.outputs.tfa_ref }}
+          repository: Yuzhii0718/atf-airoha
+          ref: ${{ steps.params.outputs.atf_ref }}
           path: trusted-firmware-a
 
+      # cert_create and fiptool come from the same tree as the firmware, so
+      # there is no version skew between the tool that writes the FIP and the
+      # code that parses it. PLAT=fvp only selects a platform for the host
+      # tools' build system; nothing target-specific is compiled here.
+      #
+      # The three overrides below are required, not cosmetic. Airoha's
+      # make_helpers/defaults.mk flips eight defaults away from upstream
+      # v2.15.0 (0/none -> 1/aes_gcm), and adds a ninth line, ENCRYPT_BL33 := 0,
+      # whose value is upstream's anyway. The flips exist because its own
+      # PLAT=en7523 enables Trusted Board Boot, and Arm's plat/arm/** makefiles
+      # then assert on them:
+      #   TRUSTED_BOARD_BOOT=0    - board_common.mk:14 gates its whole
+      #     ARM_ROTPK_LOCATION block on this; at the tree's value of 1 every
+      #     PLAT=fvp build dies with "Unsupported ARM_ROTPK_LOCATION value",
+      #     since neither tree gives that knob a default.
+      #   DECRYPTION_SUPPORT=none - constraints.mk:284 rejects any other value
+      #     once TRUSTED_BOARD_BOOT is 0.
+      #   DYN_DISABLE_AUTH=0      - constraints.mk:206 rejects 1 once
+      #     TRUSTED_BOARD_BOOT is 0. fvp's platform.mk only sets it when
+      #     TRUSTED_BOARD_BOOT=1, but the tree's defaults.mk sets it outright.
+      # Re-diff make_helpers/defaults.mk against upstream whenever the pinned
+      # ref is bumped; those eight flips are the place this coupling lives.
+      #
+      # Neither binary changes. No file under tools/ mentions any of the three,
+      # and cert_create builds with USE_TBBR_DEFS=1, which its own tbbr.mk
+      # documents as "cert_tool is platform-independent" - it compiles only
+      # src/*.c and src/tbbr/*.c and never opens plat/arm/**.
+      #
+      # PLAT=en7523 never includes plat/arm/**, so the firmware build is
+      # untouched by all of this; and for firmware the two Airoha trees agree
+      # on the value of every one of those nine flips, so nothing we validated
+      # before the switch moved.
       - name: Build fiptool and cert_create
         run: |
           set -euo pipefail
-          make -C trusted-firmware-a PLAT=fvp fiptool certtool -j"$(nproc)"
+          make -C trusted-firmware-a PLAT=fvp \
+            TRUSTED_BOARD_BOOT=0 DECRYPTION_SUPPORT=none DYN_DISABLE_AUTH=0 \
+            fiptool certtool -j"$(nproc)"
           test -x trusted-firmware-a/tools/fiptool/fiptool
           test -x trusted-firmware-a/tools/cert_create/cert_create
-
-      - name: Checkout TF-A v2.10 base
-        uses: actions/checkout@v7
-        with:
-          repository: ARM-software/arm-trusted-firmware
-          ref: ${{ env.ATF_BASE_REF }}
-          path: trusted-firmware-a-build
-
-      - name: Checkout Airoha TF-A overlay
-        uses: actions/checkout@v7
-        with:
-          repository: Ansuel/atf-airoha
-          ref: ${{ env.AIROHA_ATF_REF }}
-          path: atf-airoha-overlay
 
       - name: Checkout Mbed TLS
         uses: actions/checkout@v7
         with:
           repository: Mbed-TLS/mbedtls
           ref: ${{ env.MBEDTLS_REF }}
-          path: mbedtls-3.4.1
+          path: mbedtls-3.6.6
 
       # prepare-atf.py currently lives under xg2010g/atf/. It applies SoC-level
       # patches to Airoha's TF-A tree that are required for both boards, so it
@@ -378,8 +433,7 @@ jobs:
       - name: Prepare Airoha TF-A source and host tools
         run: |
           set -euo pipefail
-          rsync -a --checksum --exclude=.git/ atf-airoha-overlay/ trusted-firmware-a-build/
-          python3 board/airoha/xg2010g/atf/prepare-atf.py trusted-firmware-a-build
+          python3 board/airoha/xg2010g/atf/prepare-atf.py trusted-firmware-a
 
           mkdir -p atf-tools/lzma-4.65
           curl -fsSL --retry 3 -o atf-tools/bl2-toolchain.tar.xz "$BL2_TOOLCHAIN_URL"
@@ -394,13 +448,27 @@ jobs:
             atf-tools/lzma-4.65/CPP/7zip/Compress/LZMA_Alone/lzma \
             atf-tools/lzma
 
+      # Full gate: now that the pinned TF-A tree is on disk, cross-check the
+      # boot chain against the partition table. This is what catches a silent
+      # switch back to BL23's UBI FIP path (UBI_START_ADDR 0x20000) or a drift
+      # in PLAT_ECNT_FIP_OFFSET / PLAT_ECNT_FIP_MAX_SIZE.
+      - name: Check partition layout against pinned TF-A
+        env:
+          BOARD: ${{ matrix.board }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/check-partition-layout.py \
+            --board "${BOARD}" \
+            --atf-dir trusted-firmware-a \
+            --require-atf
+
       - name: Build BL2 and BL31
         env:
           AARCH64_CROSS_COMPILE: aarch64-linux-gnu-
           ARM32_CROSS_COMPILE: ${{ github.workspace }}/atf-tools/${{ env.BL2_TOOLCHAIN_NAME }}/bin/arm-none-eabi-
-          ATF_DIR: ${{ github.workspace }}/trusted-firmware-a-build
+          ATF_DIR: ${{ github.workspace }}/trusted-firmware-a
           LZMA: ${{ github.workspace }}/atf-tools/lzma
-          MBEDTLS_DIR: ${{ github.workspace }}/mbedtls-3.4.1
+          MBEDTLS_DIR: ${{ github.workspace }}/mbedtls-3.6.6
           OUTPUT_DIR: ${{ github.workspace }}/out/atf
         run: |
           set -euo pipefail
@@ -409,7 +477,7 @@ jobs:
           test -s out/atf/bl31.bin
           python3 scripts/ci/validate_lzma_alone.py \
             --label BL31 \
-            --raw trusted-firmware-a-build/build/en7523/release/bl31.bin \
+            --raw trusted-firmware-a/build/en7523/release/bl31.bin \
             --payload out/atf/bl31.bin
 
           # BL2 先把 BL33 载荷读入固定解压缓冲区，再展开到最终执行地址。
@@ -732,8 +800,7 @@ jobs:
         id: artifact
         if: ${{ steps.signing.outputs.ready == 'true' }}
         env:
-          AIROHA_ATF_BUILD_REF: ${{ env.AIROHA_ATF_REF }}
-          ATF_BUILD_BASE_REF: ${{ env.ATF_BASE_REF }}
+          ATF_BUILD_REF: ${{ env.ATF_REF }}
           BL2_BUILD_TOOLCHAIN: ${{ env.BL2_TOOLCHAIN_NAME }}
           BOARD: ${{ matrix.board }}
           BOARD_UPPER: ${{ steps.board_ids.outputs.board_upper }}
@@ -745,7 +812,6 @@ jobs:
           MTD0_SIZE: ${{ steps.params.outputs.mtd0_size }}
           RELEASE_DATE: ${{ steps.version.outputs.release_date }}
           SIGNED_READY: ${{ steps.signing.outputs.ready }}
-          TFA_REF: ${{ steps.params.outputs.tfa_ref }}
           TFA_MBEDTLS_REF: ${{ env.MBEDTLS_REF }}
           UBOOT_VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -799,9 +865,7 @@ jobs:
             echo "U-Boot version: ${UBOOT_VERSION}"
             echo "Signed mtd0: true"
             echo "Signing: required"
-            echo "TF-A tooling ref: ${TFA_REF}"
-            echo "Airoha TF-A base ref: ${ATF_BUILD_BASE_REF}"
-            echo "Airoha TF-A overlay ref: ${AIROHA_ATF_BUILD_REF}"
+            echo "Airoha TF-A ref: ${ATF_BUILD_REF} (BL2, BL31, fiptool, cert_create)"
             echo "Airoha TF-A Mbed TLS ref: ${TFA_MBEDTLS_REF}"
             echo "BL2 toolchain: ${BL2_BUILD_TOOLCHAIN}"
             echo "mtd0 size: ${MTD0_SIZE}"

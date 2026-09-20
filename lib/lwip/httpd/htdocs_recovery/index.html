@@ -466,6 +466,16 @@ button,input,select{font:inherit;letter-spacing:0}
             <p class='layout-help' id='layout-help'>UBI 2.0 - 440 MiB ubi partition (fixed layout, no selection needed)</p>
           </div>
 
+          <section class='partition-block' id='uboot-backup-block' aria-label='U-Boot mtd0 backup' hidden>
+            <div class='partition-card'>
+              <div class='partition-head'><strong>bootloader (mtd0)</strong><span>mtd0 @ 0x00000000, 2 MiB</span></div>
+              <div class='partition-actions'>
+                <a class='backup-button' href='/backup/uboot.bin' download='mtd0-bootloader-2m.bin'>Backup mtd0</a>
+              </div>
+            </div>
+            <p class='partition-help'>Download this before the first overwrite. mtd0 is the boot chain - BL2, BL31, this U-Boot and their certificates, behind the preserved vendor prefix - and it cannot be rebuilt from the env, dsd or UBI backups.</p>
+          </section>
+
           <div class='file-block'>
             <label class='file-label'>Select image file</label>
             <input id='file-input' type='file' accept='.bin,.img,.itb'>
@@ -609,6 +619,7 @@ var uploadButton=document.getElementById('upload-button');
 var rebootButton=document.getElementById('reboot-button');
 var backupLinks=document.querySelectorAll('.backup-button');
 var partitionBlock=document.getElementById('partition-block');
+var ubootBackupBlock=document.getElementById('uboot-backup-block');
 var partitionButtons=document.querySelectorAll('.partition-select');
 var layoutBlock=document.getElementById('layout-block');
 var layoutHelp=document.getElementById('layout-help');
@@ -635,6 +646,7 @@ function updateLayout(){
   var layout=layouts[selectedLayout]||layouts['2.0'];
   layoutBlock.hidden=activeTarget!=='firmware';
   partitionBlock.hidden=!partitionTargets[activeTarget];
+  ubootBackupBlock.hidden=activeTarget!=='uboot';
   layoutHelp.textContent=bt(layout.help);
   layoutHelp.className='layout-help'+(layout.warning?' warning':'');
   if(activeTarget==='firmware'){

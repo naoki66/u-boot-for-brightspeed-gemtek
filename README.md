@@ -71,7 +71,13 @@ Airoha AN7581 类平台支持（`xg2010g_defconfig` / `xr1710g_defconfig`），
 | 设备 | Brightspeed Gemtek XG2010G · XR1710G（其他设备未验证） |
 | 平台 | Airoha AN7581/AN7583 类启动链 |
 | bootloader 分区 | `0x00000000-0x00200000`，固定 2 MiB |
-| 工具版本 | TF-A tooling `v2.13.0`；Airoha TF-A 基于 `v2.10` 与固定 overlay commit |
+| 工具版本 | Airoha TF-A `v2.15.0`（`Yuzhii0718/atf-airoha`，固定 commit `6cf15a14d74d`）；Mbed TLS 3.6.6 |
+
+整条 TF-A 链路固定在同一棵树上：这棵树同时提供 BL2、BL31、`fiptool` 和
+`cert_create`，所以写 FIP 的工具与解析 FIP 的代码不会版本错配。它不再使用
+「上游 TF-A（`v2.10`）基座 + Airoha overlay 叠加」的旧结构 —— 那种结构用
+`rsync -a --checksum` 且不带 `--delete`，overlay 携带的每个文件都静默覆盖
+基础树，是历史上一次编译失败的同源机制。
 
 Brightspeed Gemtek 设备的 `mtd0` 通常不是裸 `u-boot.bin`，而是一个从 BL2 开始验证的完整
 启动包/FIP，包含 BL2、BL31、U-Boot/BL33 和证书材料。本仓库本地编译出的

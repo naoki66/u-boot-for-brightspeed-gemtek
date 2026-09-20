@@ -40,9 +40,9 @@ FIP，而不是只有 BL33 的裸 U-Boot。
 BL2、BL31 和签名材料
 --------------------
 
-BL2 负责早期硬件与 DDR 初始化，BL31 提供 EL3 运行时环境。本项目使用固定版本
-的 TF-A ``v2.10``、Airoha AN7581 overlay、Mbed TLS 和 Arm GNU Toolchain
-从源码构建这两个阶段：
+BL2 负责早期硬件与 DDR 初始化，BL31 提供 EL3 运行时环境。本项目使用固定版本的
+Airoha TF-A 树（``Yuzhii0718/atf-airoha``，v2.15.0 基线）、Mbed TLS 和
+Arm GNU Toolchain 从源码构建这两个阶段：
 
 * BL21、BL22、BL23 分三次编译，再与 NAND flash table 组装为 BL2；
 * BL31 编译后使用 Airoha 兼容的 LZMA 4.65 格式压缩；
@@ -468,7 +468,8 @@ artifact：
      - 原厂 mtd0 中 FIP 起始位置
    * - ``XG2010G_FIP_ALIGN``
      - ``0x400``
-     - FIP payload 对齐，匹配已观察到的原厂 payload 偏移
+     - FIP payload 对齐，匹配已观察到的原厂 payload 偏移。必须是 2 的幂，
+       且不能为 0 —— ``fiptool`` 的 ``get_image_align()`` 不接受别的取值
 
 可以先设置非敏感变量：
 
@@ -478,15 +479,39 @@ artifact：
    gh variable set XG2010G_FIP_OFFSET --repo naoki66/u-boot-for-brightspeed-gemtek --body 0x800
    gh variable set XG2010G_FIP_ALIGN --repo naoki66/u-boot-for-brightspeed-gemtek --body 0x400
 
-TF-A 工具版本固定在 workflow 内的 ``FIXED_TFA_REF=v2.13.0``，用于构建
-``fiptool`` 和 ``cert_create``。手动运行 Actions 时不再提供 TF-A ref 输入，
-也**不再读取 ``XG2010G_TFA_REF`` 这类板级 TFA 变量**，避免误填不同 TF-A
-版本导致 FIP/证书产物不可复现。如确实需要自定义 TFA 源，请直接 fork
-workflow 并修改 ``FIXED_TFA_REF``。
+整条 TF-A 链路固定在同一棵树：workflow 内的 ``ATF_REF``
+（``Yuzhii0718/atf-airoha``，v2.15.0）同时提供 BL2、BL31、``fiptool`` 和
+``cert_create``，因此写 FIP 的工具与解析 FIP 的代码不会版本错配。手动运行
+Actions 时不再提供 TF-A ref 输入，也**不再读取 ``XG2010G_TFA_REF`` 这类板级
+TFA 变量**，避免误填不同 TF-A 版本导致 FIP/证书产物不可复现。如确实需要
+自定义 TFA 源，请直接 fork workflow 并修改 ``ATF_REF``。
 
-BL2/BL31 使用 TF-A ``v2.10`` 基线、Airoha overlay
-``94892b9e42eb1f6992e60bce904c3ef42ea995c8`` 和 Mbed TLS
-``72718dd87e087215ce9155a826ee5a66cfbe9631`` 构建。
+Mbed TLS 固定为 3.6.6（``0bebf8b8c7f07abe3571ded48a11aa907a1ffb20``）。
+该树使用只在 3.6 及以后存在的 PSA 配置头，3.4.x 无法编译。
+
+workflow 的 ``Build fiptool and cert_create`` 一步把上游的 ``PLAT=fvp`` 借来当
+顶层 Makefile 的载体（两个工具的源码都不依赖平台），因此需要在命令行上显式把三个
+开关重置为上游 v2.15.0 的默认值：``TRUSTED_BOARD_BOOT=0``、
+``DECRYPTION_SUPPORT=none``、``DYN_DISABLE_AUTH=0``。理由如下 —— 这是 CI 内部的
+一处非显然耦合，平时无需手工操作，但升级 pinned ``ATF_REF`` 时要重新核对。
+Airoha 的 ``make_helpers/defaults.mk`` 把八个默认值从上游的 0/none 翻成了
+1/aes_gcm（``BL2_IN_XIP_MEM``、``DECRYPTION_SUPPORT``、``DYN_DISABLE_AUTH``、
+``ENABLE_CONSOLE_GETC``、``GENERATE_COT``、``RESET_TO_BL2``、``SAVE_KEYS``、
+``TRUSTED_BOARD_BOOT``；另加一行取值与上游相同的 ``ENCRYPT_BL33 := 0``），
+原因是它的 ``PLAT=en7523`` 打开了 Trusted Board Boot。代价落在被借用的
+``PLAT=fvp`` 载体上——Arm 的 ``plat/arm/**`` 会对其中三个下断言：
+``board_common.mk`` 在 ``TRUSTED_BOARD_BOOT`` 非 0 时要求
+``ARM_ROTPK_LOCATION``（两棵树都没给默认值），``constraints.mk`` 在
+``TRUSTED_BOARD_BOOT=0`` 时拒绝 ``DECRYPTION_SUPPORT != none`` 或
+``DYN_DISABLE_AUTH=1``。另外五个不需要覆盖：``BL2_IN_XIP_MEM`` 与
+``RESET_TO_BL2`` 同为 1，正好满足 ``constraints.mk`` 的配对要求；
+``ENABLE_CONSOLE_GETC``、``GENERATE_COT`` 和 ``SAVE_KEYS`` 在这条构建路径上
+不触发任何断言。``tools/`` 下没有任何文件引用这三个开关，``cert_create`` 又以
+``USE_TBBR_DEFS=1`` 构建（其 ``src/tbbr/tbbr.mk`` 写明 "cert_tool is
+platform-independent"，只编译 ``src/*.c`` 与 ``src/tbbr/*.c``），所以两个
+二进制不受影响。固件侧同样不受影响：``PLAT=en7523`` 不包含 ``plat/arm/**``，
+而且换树前后这两棵 Airoha 树对这八个翻转值的取值完全一致。升级 pinned
+``ATF_REF`` 时，应重新把 ``make_helpers/defaults.mk`` 与上游对拍。
 
 默认构建只需要设置签名私钥 Secret（XR1710G 同理，对应
 ``XR1710G_TB_PRIVATE_KEY``）：
@@ -601,7 +626,7 @@ X 模式依赖 BootROM 和串口，Web Recovery 依赖 U-Boot 的 lwIP 网络栈
 ``boot_tftp_write_bl2`` / ``mtd_write_bl2`` 助手和它的启动菜单。
 
 默认环境变量（``board/airoha/an7581/xg2010g.env`` 与共用的
-``xg2010g-tftp.env``）：:
+``include/env/airoha/an7581-tftp.env``）：:
 
     ipaddr=192.168.0.1      netmask=255.255.255.0      serverip=192.168.0.254
     tftpboot_addr=0x90000000        # 暂存区，刻意不用 $loadaddr
@@ -756,8 +781,12 @@ bootloader 分区越界处并被拒绝（``mtd read`` 会先报
      （``factory`` / ``dsd`` / ``PON`` / ``BOSA``），且**不可恢复**；
    * 写坏 ``bootloader`` 会让设备只能走 X 模式或 NAND 编程器。
 
-   所以：**写入前先用 Web Recovery 的“备份”页把 ``uenv`` / ``dsd`` 和整片
-   flash 下载到电脑**，并记录 ``mtd list`` 输出。
+   所以：**写入前先用 Web Recovery 备份页把 ``bootloader``（mtd0）、
+   ``uenv`` 和 ``dsd`` 下载到电脑**，并记录 ``mtd list`` 输出。网页只提供这
+   三个 2 MiB 分区。``bootloader`` 里是完整启动链（BL2、BL31、本仓库
+   U-Boot 及证书，位于原厂前导区之后），**无法由 ``uenv`` / ``dsd`` / UBI
+   备份重建**，因此它是回原厂时必须先留下的那一个。``ubi`` 分区（440 MiB）
+   网页不提供下载，需要时用串口 ``mtd read`` 分段读出。
 
 每个助手在**写完都会读回比对**：``mtd read``（或 ``ubi read``）到
 ``${tftpverify_addr}`` 后 ``cmp.b`` 源缓冲，一致才打印
@@ -886,6 +915,108 @@ FIP 流程封装，不能直接当作完整 mtd0 写入。
 NAND 坏块处理和 BootROM 的复制规则。建议先通过串口验证 U-Boot 能识别
 NAND 和分区，再在 Linux 中确认 ``cat /proc/mtd`` 的边界与本 DTS 一致。
 
+分区布局虽然只在设备树里描述一次，但却被四处独立引用：设备树的
+``fixed-partitions``、板级 ``XG2010G_UBI_*`` 几何常量、TFTP 救援环境里的
+尺寸断言、以及 CI 的 mtd0 镜像几何。另外 pinned TF-A 里的
+``PLAT_ECNT_FIP_OFFSET`` / ``PLAT_ECNT_FIP_MAX_SIZE`` 决定了 BL23 会从 mtd0
+的哪个偏移读多长的 FIP，因此 ``bootloader`` 分区必须能装下这个窗口。
+``scripts/ci/check-partition-layout.py`` 把这些来源放在一起对拍：
+
+.. code-block:: console
+
+   python3 scripts/ci/check-partition-layout.py --board xg2010g
+   python3 scripts/ci/check-partition-layout.py --board xg2010g \
+       --atf-dir <tf-a 源码树> --require-atf
+
+第二条命令需要 Airoha TF-A 源码树（CI 中是 ``trusted-firmware-a``），会额外
+校验 FIP 窗口、偏移和最大长度在 workflow 与 TF-A 之间一致，并检查
+``board/airoha/xg2010g/atf/build-atf.sh`` 的三个开关 —— 它们都是本仓库的
+固有约定，与换树无关，所以秒级快检门也会跑：
+
+* 一旦定义 ``TCSUPPORT_UBI_SUPPORT`` 就报错，因为那会让
+  ``plat_ecnt_io_setup()`` 用 ``fip_ubi_policy`` 覆盖无条件的
+  ``fip_memmap_policy``，BL23 改从 UBI 卷 ``fip`` 读取第二阶段 FIP，而该路径把
+  UBI 定位在 ``UBI_START_ADDR``（TF-A 默认 ``0x20000``，可用
+  ``OVERRIDE_UBI_START_ADDR`` 覆盖），与本布局的 ``ubi@0x600000`` 不兼容。
+* 要求保留 ``TCSUPPORT_EMMC=1``，那是 ``bl2_image_load_v2.c`` 中
+  memmap/XMODEM 救援路径唯一的编译开关（本板没有 eMMC）。
+* 要求**不要**定义 ``TCSUPPORT_SPI_NAND_FLASH_ECC_DMA``。这个宏会把
+  ``SPI_NAND_Flash_Init()`` 切到 SPI 控制器 DMA 读；而"只对 BL23 生效"的那个
+  守卫写的是
+  ``defined(TCSUPPORT_SPI_NAND_FLASH_ECC_DMA) && (!defined(IMAGE_BL2) ||
+  defined(IMAGE_BL23))``，其中 ``IMAGE_BL2`` 在全树**从未被定义**，所以
+  ``|| defined(IMAGE_BL23)`` 是死子句、守卫退化成只看这个宏，一开就会连
+  BL21/BL22 一起编进去 —— 而那正是该块内 Airoha 原注释写明"SPI 控制器 DMA
+  不支持这两个 SRAM"的两个阶段。当前已刷入的镜像、以及出这款板的
+  ``pbs05/uboot-an758x``（TF-A v2.10 谱系）都是在不开这个宏的情况下跑的。
+  因为 ``SPI_NAND_Flash_Init()`` 又把这个变量声明在守卫之外，
+  ``prepare-atf.py`` 会给声明加一个 ``__attribute__((unused))``，让"不开这个
+  宏"也能过 ``-Werror``；真要打开，请连同那处补丁一起改。
+
+第三项检查是 ``mk-flag-coverage``：它会扫出 TF-A 树里所有以 make 变量形式
+判断的 ``TCSUPPORT_*``，要求 ``build-atf.sh`` 显式传值，或在脚本内的
+``MK_FLAG_ALLOWLIST`` 里写明"不传就是我们要的那一支"的理由。这一项存在的
+原因是 ``add_define`` 只生成编译期 ``-D``，不会创建 make 变量，所以
+"由 ``TCSUPPORT_CPU_EN7581`` 派生" 的宏在 ``$(...)`` 判断里读到的是空值 ——
+例如 ``platform.mk`` 用 ``ifneq ($(TCSUPPORT_UBOOT_64BIT),1)`` 决定是否打开
+``INIT_UNUSED_NS_EL2``，漏传就会让 BL31 改写一组 EL2 寄存器。
+
+上面这些检查在 CI 中分两道执行：仓库内的部分在安装工具链之前跑
+（秒级失败），涉及 TF-A 的部分在 TF-A 树就绪后跑。
+
+``XG2010G_FIP_ALIGN`` 是这两类之外的一个，需要两处判据。``fiptool`` 的
+``get_image_align()``（pinned 树的 ``tools/fiptool/fiptool.c``）只接受 2 的
+幂、且不接受 0，否则 ``log_errx("Invalid alignment: ...")`` —— 而它是在打包
+FIP 那一步才抛，也就是整条 U-Boot + TF-A 链编完之后。所以仓库里的默认值
+``DEFAULT_FIP_ALIGN`` 由上面那条命令直接校验（秒级，本地可跑）；而真正生效
+的 GitHub Variable ``XG2010G_FIP_ALIGN`` 不在树里、在这里读不到，只能由
+workflow 里 “Resolve per-board identifiers and parameters” 一步用同一个
+判据在安装工具链之前挡住。判据就是 ``x > 0`` 且 ``x & (x - 1) == 0`` ——
+写 bash 版本时**括号不能省**：bash 和 C 一样让 ``!=`` 比 ``&`` 结合得更紧，
+``fip_align_dec & (fip_align_dec - 1) != 0`` 会被解析成
+``fip_align_dec & (0|1)``，``0x300`` 就静默通过了。
+
+换 TF-A 源码树后的真机验证清单
+------------------------------
+
+BL2 和 BL31 换源之后，CI 全绿**不能推出设备能启动**。CI 覆盖的只有编译、LZMA
+封装校验、证书与 FIP 结构、mtd0 组装，以及 ``bootloader`` 分区 0xff800 字节的
+窗口余量；DDR 初始化、BootROM 是否接受镜像、EL3 是否按预期跳转，都只能在真机
+上看。而且 BL2 或 BL31 只要有一个字节变化，mtd0 的整段字节布局就必然改变——
+"能编译"与"还是原来那个镜像"是两件事，不要拿旧镜像的校验和去核对新产物。
+
+按下面顺序验证，每一步都能把问题范围缩小：
+
+1. **先看结构，不碰设备**：``fiptool info`` 确认 FIP 里的 ``bl2``、``bl31`` 和
+   ``nt-fw`` 条目、条目顺序，以及写 FIP 时用的 ``--plat-toc-flags`` 值符合
+   预期。
+2. **写入前先确认版本串，再串口复核**：banner 打的是
+   ``v${VERSION}(${BUILD_TYPE}):${BUILD_STRING}``，版本号取自被编的那棵树、
+   ``BUILD_STRING`` 取自 ``git describe --always --dirty``。这一步不必等上机 ——
+   在自己的镜像里搜一下就能确认：
+
+   .. code-block:: console
+
+      grep -a -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+([a-z]*):[0-9a-zA-Z._-]\+' <board>-...-mtd0-signed.bin
+
+   换树后应得到 ``v2.15.0``（CI 本轮产物实测为
+   ``v2.15.0(release):6cf15a1-dirty``，其中 ``6cf15a1`` 就是 pinned commit 的短号，
+   ``-dirty`` 来自 ``prepare-atf.py`` 改过工作区，属正常）。仍是 ``v2.10.0`` 说明
+   拿错了 mtd0。串口再复核一次同一个串：它对不上就说明写的不是这个镜像，或没有从
+   mtd0 启动。注意 BL31 是 LZMA 压缩的，压缩后的 ``bl31.bin`` 里搜不到该串。
+3. **确认 BL2 能读 NAND 并走到救援分支**：即请求 FIP 时出现 XMODEM 提示。走不到
+   这一步，先回头查 ``TCSUPPORT_EMMC`` 与 FIP 窗口参数。
+4. **确认 DDR 探测结果**：进入 U-Boot 后核对 DDR 容量与型号。这是 EL2 与 DDR
+   初始化有没有被换树影响的第一处证据。
+5. **核对分区与卷**：在 Linux 中 ``cat /proc/mtd`` 的边界与本文档 DTS 一致，
+   ``uenv``/``dsd`` 内容未变，UBI 卷可读。
+
+回退：写入前先打开 Web Recovery 备份页，把 ``bootloader``（mtd0）、``uenv`` 和
+``dsd`` 下载到电脑并确认可读，再写新镜像。回退就是把 ``bootloader`` 备份经启动
+菜单第 2 项写回 ``0x0``，不需要动 ``uenv``/``dsd``/``ubi``。BL2 写坏后本机无法
+自行恢复，只能走 X 模式（BootROM 的 XMODEM 路径）或 NAND 编程器，所以那个 2 MiB
+备份是这一步唯一的安全网。
+
 XR1710G 差异
 ------------
 
@@ -939,3 +1070,87 @@ USXGMII 口不在 U-Boot recovery DTS 中启用，避免多 MAC 随机地址和�
 页面里不写死板型。型号由恢复服务器通过 ``/about`` 端点的 ``board`` 字段
 给出（取自 ``CONFIG_DEFAULT_DEVICE_TREE``），前端在运行时注入，因此几块板
 可以共用同一份页面资源，不会出现 XR1710G 显示 XG2010G 的情况。
+
+与 ImmortalWrt an7581 UBI 产物的对照
+----------------------------------------
+
+ImmortalWrt 的 ``airoha/an7581`` target 发布一组以 ``ubi`` 命名的启动产物。
+它们与本仓库的产物同名不同源，很容易被混用，所以这里记录实测差异。下表数据
+取自 2026-09-20 的快照（设备 ``nokia_xg-040g-md-ubi``，内核
+``Linux-6.18.52``）；快照会滚动，复核时请以当次 ``sha256sums`` 为准。
+
+.. list-table::
+   :header-rows: 1
+   :widths: 27 12 61
+
+   * - ImmortalWrt 产物
+     - 大小
+     - 实测构成，以及与本仓库产物的差别
+   * - ``...-ubi-preloader.bin``
+     - 112167
+     - ``fiptool create --tb-fw an7581-bl2.bin`` 的产物，ToC 只有 1 条
+       ``UUID_TRUSTED_BOOT_FIRMWARE_BL2``（载荷在 ``0x60``），**不含任何
+       证书**。本仓库的 ``ubi-preloader.bin`` 是 2 条：``BL2`` 加
+       ``tb_fw.crt``，并且用 ``--align 0x400`` 对齐
+   * - ``...-ubi-bl31-uboot.fip``
+     - 314152
+     - ``fiptool create --soc-fw bl31.lzma --nt-fw u-boot.lzma`` 的产物，ToC
+       只有 2 条（``BL31`` 在 ``0x88``、``BL33`` 在 ``0xae4c``），**不含任何
+       证书**。本仓库的 ``ubi-bl31-uboot.fip`` 是 7 条：``BL31``、``BL33``，
+       加 3 张 key 证书与 2 张 content 证书
+   * - ``...-ubi-initramfs-recovery.itb``
+     - 9437184
+     - FIT：``kernel-1``（``lzma``，``load`` 与 ``entry`` 都是
+       ``0x80200000``，initramfs 是编进内核镜像的、没有 ramdisk 节点）加
+       ``fdt-1``，配置节点为 ``config-1``，尾部用 ``0x00`` 补齐到 72 个
+       128 KiB 块。**本仓库没有对应产物**：本仓库只编译 U-Boot 与 TF-A，
+       不编译内核
+
+两边的体积差来自对齐，不是内容差。``fiptool`` 的 ``--align`` 默认值是 ``1``
+（``tools/fiptool/fiptool.c`` 里的 ``static unsigned long align = 1;``，
+``--help`` 也写 ``default: 1``），``pack_images()`` 用
+``(entry_offset + align - 1) & ~(align - 1)`` 对齐每个载荷，不传就是紧排。
+ImmortalWrt 不传，于是第二个条目紧接在第一个之后（``0x88`` + ``0xadc4`` =
+``0xae4c``）；本仓库传 ``${BOARD_UPPER}_FIP_ALIGN``（XG2010G 为 ``0x400``），
+每个条目都落在 ``0x400`` 边界上。
+
+互操作规则
+~~~~~~~~~~
+
+* **BL2 与 BL31/U-Boot 必须来自同一次构建。** 不要跨项目、也不要跨本仓库的
+  两个 release 混搭，例如用 ImmortalWrt 的 ``...-ubi-preloader.bin`` 去配本
+  仓库的 ``ubi-bl31-uboot.fip``。
+* 本仓库的启动产物带完整证书链，ImmortalWrt 的两个产物一张证书都没有。两棵
+  vendor 树（``Ansuel/atf-airoha`` 与 ``Yuzhii0718/atf-airoha``）的
+  ``make_helpers/defaults.mk`` 取值完全相同、都默认 ``TRUSTED_BOARD_BOOT := 1``，
+  而 ImmortalWrt 既不覆盖它、也不给 TF-A 打补丁。也就是说证书在这条链上
+  **不是启动的必要条件**，但"是否被校验、由谁校验"**在不刷机的前提下无法在
+  本仓库证明**。取证之前请一律按"成对使用"处理。
+* 本仓库的 ``boot_ubi`` 可以直接启动上面那类 ``...-ubi-*.itb``：它的链路是
+  ``ubi part ubi`` → ``ubi read ${loadaddr} fit`` →
+  ``bootm ${loadaddr}#${bootconf}``（见 ``board/airoha/an7581/xg2010g.env``，
+  ``bootconf=config-1``），而这些 ITB 的默认配置节点就是 ``config-1``、
+  ``load``/``entry`` 为 ``0x80200000``，落在"装载到 ``0x81800000`` 再由
+  ``bootm`` 重定位"的正常范围内。但**写哪个卷要留意**：恢复服务器与串口
+  TFTP 助手目前只认 ``fit`` 一个卷（``recovery_mtd=fit``，
+  ``net/lwip/httpd_recovery.c`` 里也是写死的 ``"fit"``），把恢复镜像写进
+  ``fit`` 会覆盖生产固件。
+* ImmortalWrt 的 TF-A 包直接下载 ``Ansuel/atf-airoha`` 整个仓库
+  （``package/boot/arm-trusted-firmware-airoha/Makefile`` 里
+  ``SOURCE_VERSION=94892b9e42eb1f9``），既不打补丁也不做 overlay 叠加。这
+  与本仓库现在"单棵 pinned 树"的做法一致，也是那条旧 overlay 路径被移除的
+  理由。
+
+复核方法
+~~~~~~~~
+
+.. code-block:: console
+
+   # 官方校验和（快照会滚动，以当次结果为准）
+   curl -sS https://downloads.immortalwrt.org/snapshots/targets/airoha/an7581/sha256sums
+
+   # FIP 条目：本仓库 CI 用的是同一个 fiptool，输出格式一致
+   fiptool info nokia_xg-040g-md-ubi-bl31-uboot.fip
+
+   # FIT 头不需要 mkimage：它本身就是 FDT，可以直接 dump
+   fdtdump nokia_xg-040g-md-ubi-initramfs-recovery.itb | head -40

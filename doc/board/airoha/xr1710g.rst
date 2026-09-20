@@ -110,7 +110,9 @@ GitHub Actions 签名构建
 * ``XR1710G_MTD0_PREFIX_SHA256``（推荐）：前导区 SHA256 校验值。
 * ``XR1710G_MTD0_SIZE``/``XR1710G_FIP_OFFSET``/``XR1710G_FIP_ALIGN``
   /``XR1710G_TFW_NVCTR``/``XR1710G_NTFW_NVCTR``（可选）：非敏感变量，
-  默认值见 workflow 内 ``DEFAULT_*``。
+  默认值见 workflow 内 ``DEFAULT_*``。其中 ``XR1710G_FIP_ALIGN`` 必须是
+  2 的幂且不能为 0，否则构建会在打包 FIP 时被 ``fiptool`` 拒绝；判据与
+  秒级快检门一致，见 :doc:`xg2010g` 的“建议的验证顺序”。
 
 .. warning::
    XG2010G 与 XR1710G 的 mtd0 前导区是 **板级 BootROM 专属** 的字节段，
@@ -127,8 +129,9 @@ X 模式救砖与 Web Recovery
   switch CPU 口提供的 1G 网口。FE MDIO 上的 phy5/phy8 USXGMII 口不在
   U-Boot recovery DTS 中启用，避免多 MAC 随机地址和多个 ``192.168.0.1``
   netif 同时收发导致 TCP 冲突。
-* **串口 TFTP 救砖**：与 XG2010G 共用 ``board/airoha/an7581/xg2010g-tftp.env``
-  （通过 ``xr1710g.env`` 里的 ``#include`` 引入），助手和启动菜单完全一致，
+* **串口 TFTP 救砖**：与 XG2010G 共用 ``include/env/airoha/an7581-tftp.env``
+  （两板的 ``xg2010g.env`` / ``xr1710g.env`` 里都用
+  ``#include <env/airoha/an7581-tftp.env>`` 引入），助手和启动菜单完全一致，
   见 :doc:`xg2010g` 的“串口 TFTP 救砖与启动菜单”。它只引用两板共有的分区标签
   （``bootloader`` / ``uenv`` / ``dsd`` / ``ubi``）。
 * **状态灯**：恢复页运行期间 sts 红/绿/蓝/白做呼吸跑马灯，使用 GPIO
@@ -136,6 +139,9 @@ X 模式救砖与 Web Recovery
   gpio29(L) gpio17(L) gpio19(L) gpio20(L)``。若某盏灯明暗相反，把
   该灯的 ``GPIO_ACTIVE_LOW`` 改为 ``GPIO_ACTIVE_HIGH``。
 * **RESET 键**：仍为 GPIO 0，低有效，行为与 XG2010G 完全一致。
+
+两板共用同一套启动产物，与 ImmortalWrt ``an7581`` 同名产物的差异见
+:doc:`xg2010g` 的“与 ImmortalWrt an7581 UBI 产物的对照”。
 
 恢复网页资源
 ------------
