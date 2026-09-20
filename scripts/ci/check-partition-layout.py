@@ -610,7 +610,15 @@ def parse_atf(path: Path, result: CheckResult) -> dict[str, int]:
     return out
 
 
-def atf_build_flags(result: CheckResult) -> dict[str, bool]:
+def read_atf_build(result: CheckResult) -> str:
+    """build-atf.sh with shell comments removed, or "" when it is missing."""
+    if not ATF_BUILD.exists():
+        result.fail("atf-mode", f"{ATF_BUILD} not found")
+        return ""
+    return strip_shell_comments(ATF_BUILD.read_text(encoding="utf-8"))
+
+
+def atf_build_flags(code: str) -> dict[str, bool]:
     """Read the load-bearing switches out of build-atf.sh.
 
     ``ubi`` must stay False: defining ``TCSUPPORT_UBI_SUPPORT`` (as a make
@@ -620,14 +628,15 @@ def atf_build_flags(result: CheckResult) -> dict[str, bool]:
     the only thing that keeps the XMODEM rescue path compiled in, since the
     boards have no eMMC.
     """
-    if not ATF_BUILD.exists():
-        result.fail("atf-mode", f"{ATF_BUILD} not found")
-        return {"ubi": False, "emmc": False}
-    code = strip_shell_comments(ATF_BUILD.read_text(encoding="utf-8"))
     return {
         "ubi": "TCSUPPORT_UBI_SUPPORT" in code,
         "emmc": bool(re.search(r"TCSUPPORT_EMMC\s*=\s*1", code)),
     }
+
+
+def atf_build_provides(code: str) -> set[str]:
+    """The ``TCSUPPORT_*`` names build-atf.sh passes to make as variables."""
+    return set(re.findall(r"^\s*(TCSUPPORT_[A-Z0-9_]+)\s*=", code, re.M))
 
 
 def check_atf(
@@ -714,6 +723,80 @@ def check_atf(
 # ---------------------------------------------------------------------------
 
 
+def mk_conditional_flags(atf_dir: Path) -> dict[str, str]:
+    """Macros the pinned tree reads as *make* variables in its own conditionals.
+
+    ``add_define`` only emits a compiler ``-D``; it does not create a make
+    variable. A macro that is derived inside the top-level Makefile therefore
+    looks satisfied from C but reads as empty in a ``$(...)`` test, which is how
+    a flag can silently flip a make-side default.
+    """
+    out: dict[str, str] = {}
+    candidates = [p for p in atf_dir.rglob("*.mk")] + [atf_dir / "Makefile"]
+    for path in candidates:
+        if ".git" in path.parts or not path.is_file():
+            continue
+        for line_no, line in enumerate(
+            path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1
+        ):
+            stripped = line.strip()
+            if not re.match(r"^(ifneq|ifeq|ifdef|ifndef)\b", stripped):
+                continue
+            for token in re.findall(r"\$\((TCSUPPORT_[A-Z0-9_]+)\)", stripped):
+                out.setdefault(token, f"{path.relative_to(atf_dir)}:{line_no}")
+    return out
+
+
+def check_mk_flag_coverage(
+    result: CheckResult, atf_dir: Path, provided: set[str]
+) -> None:
+    unknown = {
+        name: where
+        for name, where in mk_conditional_flags(atf_dir).items()
+        if name not in provided and name not in MK_FLAG_ALLOWLIST
+    }
+    for name, where in sorted(unknown.items()):
+        result.fail(
+            "mk-flag-coverage",
+            f"{where} tests $({name}) as a make variable but build-atf.sh does "
+            f"not set it. A define derived inside the top-level Makefile does "
+            f"not create a make variable, so a derived -D reads as empty here "
+            f"and silently picks the unset branch. Pass it explicitly, or add "
+            f"it to MK_FLAG_ALLOWLIST in this script with the reason the unset "
+            f"default is the wanted one",
+        )
+
+
+# Macros the pinned TF-A tree tests as make variables but build-atf.sh
+# deliberately leaves unset. Every entry has to be justified: the point of the
+# list is that a newly pinned tree which starts reading one of these must fail
+# the build rather than silently pick the unset branch. See
+# check_mk_flag_coverage().
+MK_FLAG_ALLOWLIST = {
+    # Feature switches this board does not use. Each is off unless asked for.
+    "TCSUPPORT_ARM_MULTIBOOT": "multiboot layout; unset selects the single image",
+    "TCSUPPORT_ARM_SECURE_BOOT": "secure boot chain; not enabled on these boards",
+    "TCSUPPORT_ARM_SECURE_BOOT_FLASH_KEY": "secure boot chain; not enabled",
+    "TCSUPPORT_ARM_SECURE_BOOT_FW_ENC": "encrypted firmware; not enabled",
+    "TCSUPPORT_AUTOBENCH": "lab-only benchmark flavour",
+    "TCSUPPORT_BOARD_SELECT": "multi-board SDK selector; we pin one board per build",
+    "TCSUPPORT_CPU_AN7552": "other SoC",
+    "TCSUPPORT_CPU_AN7583": "other SoC",
+    "TCSUPPORT_DUAL_KEY": "two-key secure boot; not enabled",
+    "TCSUPPORT_GPT_ATF_SUPPORT": "eMMC/GPT FIP placement; this board is NAND only",
+    "TCSUPPORT_OPTEE": "no BL32 on these boards",
+    "TCSUPPORT_PARALLEL_NAND": "the boot strap is SPI-NAND; raw NAND backend unused",
+    "TCSUPPORT_TPL_SUPPORT": "TPL image; not part of this boot chain",
+    "TCSUPPORT_UBI_SUPPORT": "switching it on would move the FIP into a UBI volume",
+    # Not a feature switch. Empty means "not zero", which is the branch the
+    # previous tree always took: the un-open (blob linked) sources get built.
+    "TCSUPPORT_BB_FIX_UNOPEN": "empty reads as non-zero, i.e. include the un-open sources",
+    # Same shape: empty is the configured branch, so BL2_UNOPEN_SOURCES carries
+    # the vendor DDR/eFuse objects.
+    "TCSUPPORT_ATF_RELEASE": "empty selects the non-ATF-release source list",
+}
+
+
 def check_board(board: str, atf_dir: Path | None, require_atf: bool) -> CheckResult:
     result = CheckResult()
     dts_path = REPO / "arch" / "arm" / "dts" / f"{board}.dts"
@@ -737,12 +820,14 @@ def check_board(board: str, atf_dir: Path | None, require_atf: bool) -> CheckRes
     wf = parse_workflow_env(WORKFLOW, result)
     check_workflow(result, wf, parts)
 
-    flags = atf_build_flags(result)
+    build_code = read_atf_build(result)
+    flags = atf_build_flags(build_code)
     atf: dict[str, int] = {}
     if atf_dir is not None:
         atf = parse_atf(atf_dir, result)
         if not atf and require_atf:
             result.fail("atf", f"{atf_dir}: no TF-A constants parsed")
+        check_mk_flag_coverage(result, atf_dir, atf_build_provides(build_code))
     elif require_atf:
         result.fail("atf", "--require-atf given but no --atf-dir")
     else:

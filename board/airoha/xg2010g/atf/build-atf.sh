@@ -63,6 +63,15 @@ common_flags=(
     TCSUPPORT_ATF_UNOPEN=0
     # 顶层 Makefile 由它派生 TCSUPPORT_CPU_EN7523 / EN7512 / ARMV8 / UBOOT_64BIT。
     TCSUPPORT_CPU_EN7581=1
+    # 必须按 make 变量传，不能只靠上面那条派生出来的 -D。
+    # plat/ecnt/en7523/platform.mk:955 读的是 make 变量：
+    #     ifneq ($(TCSUPPORT_UBOOT_64BIT),1) → INIT_UNUSED_NS_EL2 := 1
+    # add_define 只产生编译期 -D，不会把 make 变量本身置上，所以漏传这一条会让
+    # BL31 去改写 CNTVOFF_EL2/HSTR_EL2/CPTR_EL2/CNTHCTL_EL2。本板 BL33 是
+    # AArch64 U-Boot（ecnt_plat_common.c 据此选 plat_get_spsr_for_bl33_entry 的
+    # AArch64 分支），EL2 由内核自己管，旧树（v2.10 overlay）里
+    # INIT_UNUSED_NS_EL2 一直是 0，这里必须保持同样的取值。
+    TCSUPPORT_UBOOT_64BIT=1
     TCSUPPORT_EMMC=1
     TCSUPPORT_UBOOT=1
     TCSUPPORT_BL2_OPTIMIZATION=1

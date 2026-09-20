@@ -905,15 +905,25 @@ NAND 和分区，再在 Linux 中确认 ``cat /proc/mtd`` 的边界与本 DTS �
 
 第二条命令需要 Airoha TF-A 源码树（CI 中是 ``trusted-firmware-a``），会额外
 校验 FIP 窗口、偏移和最大长度在 workflow 与 TF-A 之间一致，并检查
-``board/airoha/xg2010g/atf/build-atf.sh`` 的两个开关：一旦它定义
+``board/airoha/xg2010g/atf/build-atf.sh`` 的开关：一旦它定义
 ``TCSUPPORT_UBI_SUPPORT`` 就报错，因为那会让 ``plat_ecnt_io_setup()`` 用
 ``fip_ubi_policy`` 覆盖无条件的 ``fip_memmap_policy``，BL23 改从 UBI 卷
 ``fip`` 读取第二阶段 FIP，而该路径把 UBI 定位在 ``UBI_START_ADDR``（TF-A
 默认 ``0x20000``，可用 ``OVERRIDE_UBI_START_ADDR`` 覆盖），与本布局的
 ``ubi@0x600000`` 不兼容；同时要求它保留 ``TCSUPPORT_EMMC=1``，那是
 ``bl2_image_load_v2.c`` 中 memmap/XMODEM 救援路径唯一的编译开关
-（本板没有 eMMC）。上面这些检查在 CI 中分两道执行：仓库内的部分在
-安装工具链之前跑（秒级失败），涉及 TF-A 的部分在 TF-A 树就绪后跑。
+（本板没有 eMMC）。
+
+第三项检查是 ``mk-flag-coverage``：它会扫出 TF-A 树里所有以 make 变量形式
+判断的 ``TCSUPPORT_*``，要求 ``build-atf.sh`` 显式传值，或在脚本内的
+``MK_FLAG_ALLOWLIST`` 里写明"不传就是我们要的那一支"的理由。这一项存在的
+原因是 ``add_define`` 只生成编译期 ``-D``，不会创建 make 变量，所以
+"由 ``TCSUPPORT_CPU_EN7581`` 派生" 的宏在 ``$(...)`` 判断里读到的是空值 ——
+例如 ``platform.mk`` 用 ``ifneq ($(TCSUPPORT_UBOOT_64BIT),1)`` 决定是否打开
+``INIT_UNUSED_NS_EL2``，漏传就会让 BL31 改写一组 EL2 寄存器。
+
+上面这些检查在 CI 中分两道执行：仓库内的部分在安装工具链之前跑
+（秒级失败），涉及 TF-A 的部分在 TF-A 树就绪后跑。
 
 XR1710G 差异
 ------------
