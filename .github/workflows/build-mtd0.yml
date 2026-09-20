@@ -35,6 +35,12 @@ on:
 
 env:
   ARCH: arm
+  # Pin the runner image instead of using ubuntu-latest.  GitHub moves
+  # ubuntu-latest to Ubuntu 26.04 in November 2026, which would silently change
+  # gcc, binutils, python and the signing toolchain underneath a release build.
+  # This workflow is validated on 24.04; bump this deliberately after testing on
+  # the new image.
+  RUNNER_IMAGE: ubuntu-24.04
   AIROHA_ATF_REF: 94892b9e42eb1f6992e60bce904c3ef42ea995c8
   ATF_BASE_REF: v2.10
   BL2_TOOLCHAIN_NAME: arm-gnu-toolchain-15.3.rel1-x86_64-arm-none-eabi
@@ -72,7 +78,7 @@ permissions:
 jobs:
   select-boards:
     name: Select boards to build
-    runs-on: ubuntu-latest
+    runs-on: ${{ env.RUNNER_IMAGE }}
     outputs:
       boards: ${{ steps.select.outputs.boards }}
     steps:
@@ -113,7 +119,7 @@ jobs:
     concurrency:
       group: build-mtd0-${{ github.workflow }}-${{ github.ref }}-${{ matrix.board }}
       cancel-in-progress: true
-    runs-on: ubuntu-latest
+    runs-on: ${{ env.RUNNER_IMAGE }}
     strategy:
       fail-fast: false
       matrix:
@@ -842,7 +848,7 @@ jobs:
     name: Publish signed mtd0 release
     needs: [select-boards, build]
     if: ${{ github.event_name == 'workflow_dispatch' && needs.build.outputs.build_mode != 'test' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ env.RUNNER_IMAGE }}
     permissions:
       contents: write
 
