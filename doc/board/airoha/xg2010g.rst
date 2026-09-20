@@ -488,6 +488,28 @@ TFA 变量**，避免误填不同 TF-A 版本导致 FIP/证书产物不可复现
 Mbed TLS 固定为 3.6.6（``0bebf8b8c7f07abe3571ded48a11aa907a1ffb20``）。
 该树使用只在 3.6 及以后存在的 PSA 配置头，3.4.x 无法编译。
 
+``fiptool`` 和 ``cert_create`` 与固件同源，但借用上游的 ``PLAT=fvp`` 作为顶层
+Makefile 的载体，因此这条命令必须把三个开关显式重置为上游 v2.15.0 的默认值：
+``TRUSTED_BOARD_BOOT=0``、``DECRYPTION_SUPPORT=none``、``DYN_DISABLE_AUTH=0``。
+Airoha 的 ``make_helpers/defaults.mk`` 把八个默认值从上游的 0/none 翻成了
+1/aes_gcm（``BL2_IN_XIP_MEM``、``DECRYPTION_SUPPORT``、``DYN_DISABLE_AUTH``、
+``ENABLE_CONSOLE_GETC``、``GENERATE_COT``、``RESET_TO_BL2``、``SAVE_KEYS``、
+``TRUSTED_BOARD_BOOT``；另加一行取值与上游相同的 ``ENCRYPT_BL33 := 0``），
+原因是它的 ``PLAT=en7523`` 打开了 Trusted Board Boot。代价落在被借用的
+``PLAT=fvp`` 载体上——Arm 的 ``plat/arm/**`` 会对其中三个下断言：
+``board_common.mk`` 在 ``TRUSTED_BOARD_BOOT`` 非 0 时要求
+``ARM_ROTPK_LOCATION``（两棵树都没给默认值），``constraints.mk`` 在
+``TRUSTED_BOARD_BOOT=0`` 时拒绝 ``DECRYPTION_SUPPORT != none`` 或
+``DYN_DISABLE_AUTH=1``。另外五个不需要覆盖：``BL2_IN_XIP_MEM`` 与
+``RESET_TO_BL2`` 同为 1，正好满足 ``constraints.mk`` 的配对要求；
+``ENABLE_CONSOLE_GETC``、``GENERATE_COT`` 和 ``SAVE_KEYS`` 在这条构建路径上
+不触发任何断言。``tools/`` 下没有任何文件引用这三个开关，``cert_create`` 又以
+``USE_TBBR_DEFS=1`` 构建（其 ``src/tbbr/tbbr.mk`` 写明 "cert_tool is
+platform-independent"，只编译 ``src/*.c`` 与 ``src/tbbr/*.c``），所以两个
+二进制不受影响。固件侧同样不受影响：``PLAT=en7523`` 不包含 ``plat/arm/**``，
+而且换树前后这两棵 Airoha 树对这八个翻转值的取值完全一致。升级 pinned
+``ATF_REF`` 时，应重新把 ``make_helpers/defaults.mk`` 与上游对拍。
+
 默认构建只需要设置签名私钥 Secret（XR1710G 同理，对应
 ``XR1710G_TB_PRIVATE_KEY``）：
 
@@ -905,14 +927,36 @@ NAND 和分区，再在 Linux 中确认 ``cat /proc/mtd`` 的边界与本 DTS �
 
 第二条命令需要 Airoha TF-A 源码树（CI 中是 ``trusted-firmware-a``），会额外
 校验 FIP 窗口、偏移和最大长度在 workflow 与 TF-A 之间一致，并检查
-``board/airoha/xg2010g/atf/build-atf.sh`` 的开关：一旦它定义
-``TCSUPPORT_UBI_SUPPORT`` 就报错，因为那会让 ``plat_ecnt_io_setup()`` 用
-``fip_ubi_policy`` 覆盖无条件的 ``fip_memmap_policy``，BL23 改从 UBI 卷
-``fip`` 读取第二阶段 FIP，而该路径把 UBI 定位在 ``UBI_START_ADDR``（TF-A
-默认 ``0x20000``，可用 ``OVERRIDE_UBI_START_ADDR`` 覆盖），与本布局的
-``ubi@0x600000`` 不兼容；同时要求它保留 ``TCSUPPORT_EMMC=1``，那是
-``bl2_image_load_v2.c`` 中 memmap/XMODEM 救援路径唯一的编译开关
-（本板没有 eMMC）。
+``board/airoha/xg2010g/atf/build-atf.sh`` 的三个开关 —— 它们都是本仓库的
+固有约定，与换树无关，所以秒级快检门也会跑：
+
+* 一旦定义 ``TCSUPPORT_UBI_SUPPORT`` 就报错，因为那会让
+  ``plat_ecnt_io_setup()`` 用 ``fip_ubi_policy`` 覆盖无条件的
+  ``fip_memmap_policy``，BL23 改从 UBI 卷 ``fip`` 读取第二阶段 FIP，而该路径把
+  UBI 定位在 ``UBI_START_ADDR``（TF-A 默认 ``0x20000``，可用
+  ``OVERRIDE_UBI_START_ADDR`` 覆盖），与本布局的 ``ubi@0x600000`` 不兼容。
+* 要求保留 ``TCSUPPORT_EMMC=1``，那是 ``bl2_image_load_v2.c`` 中
+  memmap/XMODEM 救援路径唯一的编译开关（本板没有 eMMC）。
+* 要求**不要**定义 ``TCSUPPORT_SPI_NAND_FLASH_ECC_DMA``。这个宏会把
+  ``SPI_NAND_Flash_Init()`` 切到 SPI 控制器 DMA 读；而"只对 BL23 生效"的那个
+  守卫写的是
+  ``defined(TCSUPPORT_SPI_NAND_FLASH_ECC_DMA) && (!defined(IMAGE_BL2) ||
+  defined(IMAGE_BL23))``，其中 ``IMAGE_BL2`` 在全树**从未被定义**，所以
+  ``|| defined(IMAGE_BL23)`` 是死子句、守卫退化成只看这个宏，一开就会连
+  BL21/BL22 一起编进去 —— 而那正是该块内 Airoha 原注释写明"SPI 控制器 DMA
+  不支持这两个 SRAM"的两个阶段。当前已刷入的镜像、以及出这款板的
+  ``pbs05/uboot-an758x``（TF-A v2.10 谱系）都是在不开这个宏的情况下跑的。
+  因为 ``SPI_NAND_Flash_Init()`` 又把这个变量声明在守卫之外，
+  ``prepare-atf.py`` 会给声明加一个 ``__attribute__((unused))``，让"不开这个
+  宏"也能过 ``-Werror``；真要打开，请连同那处补丁一起改。
+
+第三项检查是 ``mk-flag-coverage``：它会扫出 TF-A 树里所有以 make 变量形式
+判断的 ``TCSUPPORT_*``，要求 ``build-atf.sh`` 显式传值，或在脚本内的
+``MK_FLAG_ALLOWLIST`` 里写明"不传就是我们要的那一支"的理由。这一项存在的
+原因是 ``add_define`` 只生成编译期 ``-D``，不会创建 make 变量，所以
+"由 ``TCSUPPORT_CPU_EN7581`` 派生" 的宏在 ``$(...)`` 判断里读到的是空值 ——
+例如 ``platform.mk`` 用 ``ifneq ($(TCSUPPORT_UBOOT_64BIT),1)`` 决定是否打开
+``INIT_UNUSED_NS_EL2``，漏传就会让 BL31 改写一组 EL2 寄存器。
 
 第三项检查是 ``mk-flag-coverage``：它会扫出 TF-A 树里所有以 make 变量形式
 判断的 ``TCSUPPORT_*``，要求 ``build-atf.sh`` 显式传值，或在脚本内的
@@ -924,6 +968,36 @@ NAND 和分区，再在 Linux 中确认 ``cat /proc/mtd`` 的边界与本 DTS �
 
 上面这些检查在 CI 中分两道执行：仓库内的部分在安装工具链之前跑
 （秒级失败），涉及 TF-A 的部分在 TF-A 树就绪后跑。
+
+换 TF-A 源码树后的真机验证清单
+------------------------------
+
+BL2 和 BL31 换源之后，CI 全绿**不能推出设备能启动**。CI 覆盖的只有编译、LZMA
+封装校验、证书与 FIP 结构、mtd0 组装，以及 ``bootloader`` 分区 0xff800 字节的
+窗口余量；DDR 初始化、BootROM 是否接受镜像、EL3 是否按预期跳转，都只能在真机
+上看。而且 BL2 或 BL31 只要有一个字节变化，mtd0 的整段字节布局就必然改变——
+"能编译"与"还是原来那个镜像"是两件事，不要拿旧镜像的校验和去核对新产物。
+
+按下面顺序验证，每一步都能把问题范围缩小：
+
+1. **先看结构，不碰设备**：``fiptool info`` 确认 FIP 里的 ``bl2``、``bl31`` 和
+   ``nt-fw`` 条目、条目顺序，以及写 FIP 时用的 ``--plat-toc-flags`` 值符合
+   预期。
+2. **串口看版本串**：换树后 BL2/BL31 的 banner 应显示 ``2.15.0``，而不是旧树的
+   ``v2.10.0-dirty``。仍显示旧版本，说明写的不是本次构建的 mtd0，或没有从 mtd0
+   启动。
+3. **确认 BL2 能读 NAND 并走到救援分支**：即请求 FIP 时出现 XMODEM 提示。走不到
+   这一步，先回头查 ``TCSUPPORT_EMMC`` 与 FIP 窗口参数。
+4. **确认 DDR 探测结果**：进入 U-Boot 后核对 DDR 容量与型号。这是 EL2 与 DDR
+   初始化有没有被换树影响的第一处证据。
+5. **核对分区与卷**：在 Linux 中 ``cat /proc/mtd`` 的边界与本文档 DTS 一致，
+   ``uenv``/``dsd`` 内容未变，UBI 卷可读。
+
+回退：写入前先打开 Web Recovery 备份页，把 ``bootloader``（mtd0）、``uenv`` 和
+``dsd`` 下载到电脑并确认可读，再写新镜像。回退就是把 ``bootloader`` 备份经启动
+菜单第 2 项写回 ``0x0``，不需要动 ``uenv``/``dsd``/``ubi``。BL2 写坏后本机无法
+自行恢复，只能走 X 模式（BootROM 的 XMODEM 路径）或 NAND 编程器，所以那个 2 MiB
+备份是这一步唯一的安全网。
 
 XR1710G 差异
 ------------

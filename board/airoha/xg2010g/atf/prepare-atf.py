@@ -9,8 +9,9 @@ unconditional ``fip_memmap_policy`` assignment in ``plat_ecnt_io_setup()``
 is what BL23 ends up using. Keeping the old patch would mean matching text
 that no longer exists.
 
-The remaining patch fixes an uninitialised struct in the host side flash
-table generator.
+Two patches remain. The first fixes an uninitialised struct in the host side
+flash table generator; the second marks a vendor variable as possibly unused,
+because we deliberately build with SPI-NAND ECC DMA off (see below).
 """
 
 import argparse
@@ -55,6 +56,40 @@ def main() -> None:
         """\tint buf_size = 1000000; //16M
 \tstruct bl2_flash_H flash_h = {0};
 \tchar *buf = NULL;
+""",
+    )
+
+    # SPI_NAND_Flash_Init() declares dma_on unconditionally but only ever
+    # touches it inside the block below, so the build fails with
+    # -Werror=unused-variable unless TCSUPPORT_SPI_NAND_FLASH_ECC_DMA is
+    # defined. We keep that macro undefined on purpose:
+    #
+    #   * The block switches the SPI controller into DMA mode for NAND reads.
+    #     Airoha's own comment in it says "BL2 is worked at L2C or FW SRAM,
+    #     SPI controller DMA does not support these two SRAM", so it is meant
+    #     to stay off for the BL2 stages.
+    #   * It cannot be kept off for BL21/BL22 alone right now: the guard is
+    #         #if defined(TCSUPPORT_SPI_NAND_FLASH_ECC_DMA) && \
+    #             (!defined(IMAGE_BL2) || defined(IMAGE_BL23))
+    #     and IMAGE_BL2 is not defined anywhere in the tree, so
+    #     !defined(IMAGE_BL2) is always true and the || clause is dead. The
+    #     guard collapses to the bare macro and would therefore pull DMA into
+    #     BL21 and BL22 as well.
+    #   * Both our currently flashed image and the reference project that
+    #     ships this board (pbs05/uboot-an758x) run with the macro undefined,
+    #     i.e. with this path off. Its tree predates dma_on and the guard, so
+    #     it never has to declare the macro at all.
+    #
+    # Marking the declaration unused keeps Airoha's code shape and leaves the
+    # build identical in behaviour to the image we know boots. Flipping to
+    # DMA reads means defining the macro in build-atf.sh and dropping this
+    # patch - a single, deliberate step, not something to drift into.
+    replace_once(
+        args.source / "plat/ecnt/common/drivers/flash/spi_nand_flash.c",
+        """\tint dma_on;
+""",
+        """\t/* prepare-atf.py: only used when TCSUPPORT_SPI_NAND_FLASH_ECC_DMA is set. */
+\tint dma_on __attribute__((unused));
 """,
     )
 

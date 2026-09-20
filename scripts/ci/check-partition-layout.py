@@ -38,14 +38,30 @@ tree, not in this repository:
     so the mtd0 path is the default and the UBI path is the opt-in. The v2.15
     Makefile provides no ``add_define`` for that macro, so it can only reach
     the compiler through ``BSP_CFLAGS``; ``build-atf.sh`` passes no
-    ``BSP_CFLAGS`` at all. Load-bearing checks ``fip-flag-vs-layout`` and
-    ``xmodem-vs-atf`` below keep it that way.
+    ``BSP_CFLAGS`` at all. Load-bearing checks ``fip-flag-vs-layout``,
+    ``xmodem-vs-atf`` and ``ecc-dma-vs-atf`` below keep it that way.
   * ``build-atf.sh`` must keep ``TCSUPPORT_EMMC=1``. ``bl2_image_load_v2.c``
     gates the memmap/XMODEM rescue path (``bl2_mem_params_backup()``,
     ``plat_ecnt_io_switch_to_memmap()``, ``fip_image_xmodem_load()``) and the
     matching stubs in ``ecnt_bl2_mem_params_desc.c`` on
     ``TCSUPPORT_UBI_SUPPORT || TCSUPPORT_EMMC``. These boards have no eMMC; the
     switch is purely the key that keeps the serial recovery path compiled in.
+  * ``build-atf.sh`` must keep ``TCSUPPORT_SPI_NAND_FLASH_ECC_DMA`` *undefined*.
+    ``SPI_NAND_Flash_Init()`` declares ``dma_on`` unconditionally but only ever
+    touches it inside that macro's block, so the tree compiles only with the
+    macro set -- which is how the vendor's own ``build.sh`` builds it, through
+    ``BSP_CFLAGS``. We keep it off because the guard around that block,
+    ``defined(TCSUPPORT_SPI_NAND_FLASH_ECC_DMA) && (!defined(IMAGE_BL2) ||
+    defined(IMAGE_BL23))``, does not do what it says: ``IMAGE_BL2`` is defined
+    nowhere in the tree, so ``!defined(IMAGE_BL2)`` is always true, the ``||``
+    clause is dead, and the guard collapses to the bare macro. Defining it
+    would therefore pull SPI controller DMA into BL21 and BL22 as well -- the
+    two stages Airoha's own comment in that block rules out ("SPI controller
+    DMA does not support these two SRAM"). Both the image currently flashed on
+    these boards and the tree of the project that ships this board
+    (``pbs05/uboot-an758x``, TF-A v2.10 lineage) run with the macro undefined.
+    Check ``ecc-dma-vs-atf`` holds the line; the source patch that lets the
+    macro stay off lives in ``board/airoha/xg2010g/atf/prepare-atf.py``.
 
 Note what is deliberately *not* checked: the ``flash_table.bin`` that
 ``spi_nand_flash_table.c`` emits is a NAND *device* table (manufacturer/device
@@ -626,11 +642,15 @@ def atf_build_flags(code: str) -> dict[str, bool]:
     unconditional ``fip_memmap_policy`` with ``fip_ubi_policy`` and BL23 then
     looks for the FIP in the UBI volume ``fip``. ``emmc`` must stay True: it is
     the only thing that keeps the XMODEM rescue path compiled in, since the
-    boards have no eMMC.
+    boards have no eMMC. ``nand_ecc_dma`` must stay False: it switches
+    ``SPI_NAND_Flash_Init()`` to SPI controller DMA reads, and the guard that
+    is supposed to keep that off for the BL21/BL22 stages cannot fire because
+    ``IMAGE_BL2`` is defined nowhere in the tree.
     """
     return {
         "ubi": "TCSUPPORT_UBI_SUPPORT" in code,
         "emmc": bool(re.search(r"TCSUPPORT_EMMC\s*=\s*1", code)),
+        "nand_ecc_dma": "TCSUPPORT_SPI_NAND_FLASH_ECC_DMA" in code,
     }
 
 
@@ -694,8 +714,22 @@ def check_atf(
             "so the flag is purely the key for the serial recovery path",
         )
 
-    # Both load-bearing checks below are properties of this repository, not of
-    # the ATF checkout, so they fire in the cheap gate too. The UBI_START_ADDR
+    if flags["nand_ecc_dma"]:
+        result.fail(
+            "ecc-dma-vs-atf",
+            "build-atf.sh defines TCSUPPORT_SPI_NAND_FLASH_ECC_DMA, which makes "
+            "SPI_NAND_Flash_Init() program the SPI controller for DMA reads. The "
+            "guard is defined(TCSUPPORT_SPI_NAND_FLASH_ECC_DMA) && "
+            "(!defined(IMAGE_BL2) || defined(IMAGE_BL23)), and IMAGE_BL2 is "
+            "defined nowhere in the tree, so the second clause is dead: DMA "
+            "would also land in BL21 and BL22, the two stages Airoha's own "
+            "comment says cannot do controller DMA. Turning it on is a "
+            "deliberate change - drop the __attribute__((unused)) patch in "
+            "board/airoha/xg2010g/atf/prepare-atf.py in the same commit",
+        )
+
+    # All three load-bearing checks below are properties of this repository, not
+    # of the ATF checkout, so they fire in the cheap gate too. The UBI_START_ADDR
     # value from the ATF tree only improves the message.
     if ubi is None:
         return

@@ -55,6 +55,18 @@ clean_atf_tree() {
 #   plat_ecnt_io_switch_to_memmap() + fip_image_xmodem_load()）被
 #   `UBI_SUPPORT || EMMC` 门控，而 plat_ecnt_io_switch_to_memmap() 本身也只在
 #   同一条件下定义。本板不用 eMMC，这个开关纯粹是解锁 memmap/XMODEM 路径的钥匙。
+#
+# 这套开关是刻意挑出来的子集，不是厂商 build.sh 那一整份 BSP_CFLAGS（那份还带
+# -fsigned-char、-DTCSUPPORT_LITTLE_ENDIAN、EN7521/EN7580/MT7520 等族 CPU 宏，
+# 以及 UBI/GPT 两项）。其中 -DTCSUPPORT_SPI_NAND_FLASH_ECC_DMA 尤其不能照抄：
+# 它会把 SPI_NAND_Flash_Init() 切到 SPI 控制器 DMA 读，而"只对 BL23 生效"的那个
+# 守卫写成 (!defined(IMAGE_BL2) || defined(IMAGE_BL23))，IMAGE_BL2 在全树从未被
+# 定义，于是 || 这一支是死的、守卫退化成只看这个宏，一开就连 BL21/BL22 一起编
+# 进去 —— 而那正是该块内 Airoha 原注释写明"SPI 控制器 DMA 不支持这两个 SRAM"
+# 的两个阶段。当前已刷入的镜像也跑在关闭状态下。因为 SPI_NAND_Flash_Init() 把
+# dma_on 声明在守卫之外，prepare-atf.py 会给它加 __attribute__((unused))，让关闭
+# 状态下也能过 -Werror；真正要打开就得同时删掉那处补丁。
+# scripts/ci/check-partition-layout.py 的 ecc-dma-vs-atf 门会挡住误开。
 common_flags=(
     PLAT=en7523
     MBEDTLS_DIR="$MBEDTLS_DIR"
