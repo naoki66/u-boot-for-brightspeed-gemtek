@@ -625,7 +625,7 @@ X 模式依赖 BootROM 和串口，Web Recovery 依赖 U-Boot 的 lwIP 网络栈
 ``boot_tftp_write_bl2`` / ``mtd_write_bl2`` 助手和它的启动菜单。
 
 默认环境变量（``board/airoha/an7581/xg2010g.env`` 与共用的
-``xg2010g-tftp.env``）：:
+``include/env/airoha/an7581-tftp.env``）：:
 
     ipaddr=192.168.0.1      netmask=255.255.255.0      serverip=192.168.0.254
     tftpboot_addr=0x90000000        # 暂存区，刻意不用 $loadaddr
