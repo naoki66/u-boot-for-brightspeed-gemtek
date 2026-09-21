@@ -57,6 +57,7 @@
 - [📂 Release 文件名规范](#-release-文件名规范)
 - [🔧 本地构建](#-本地构建)
 - [📖 详细文档](#-详细文档)
+- [🙏 致谢](#-致谢)
 - [📄 GPL](#-gpl)
 
 ---
@@ -349,6 +350,20 @@ make CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)
 | U-Boot 项目主文档 | [README](https://github.com/u-boot/u-boot/blob/master/README) |
 
 <p align="right"><a href="#top"><b>↑ 返回顶部</b></a></p>
+
+## 🙏 致谢
+
+本项目依赖以下开源项目构建 BL2/BL31（Airoha ATF），特此致谢：
+
+- [**Ansuel/atf-airoha**](https://github.com/Ansuel/atf-airoha) — Airoha ATF overlay
+  上游，基于 ARM Trusted Firmware-A `v2.10`，提供 Airoha AN7581 平台的 BL2
+  （AArch32 + XMODEM 救援链）、BL31、平台驱动与 DDR 初始化 blob 整合。
+- [**Yuzhii0718/atf-airoha**](https://github.com/Yuzhii0718/atf-airoha) — 上游
+  fork，升级至 ARM Trusted Firmware-A `v2.15`，本仓库 CI 当前使用该版本
+  （固定 commit `6cf15a14d74d`），并沿用其 `build.sh` 三段式 BL2 打包流程。
+
+同时感谢 [ARM Trusted Firmware-A](https://github.com/ARM-software/arm-trusted-firmware)
+上游项目与 [U-Boot](https://github.com/u-boot/u-boot) 上游项目。
 
 ## 📄 GPL
 
