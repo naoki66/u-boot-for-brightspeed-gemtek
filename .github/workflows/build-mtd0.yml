@@ -674,7 +674,17 @@ jobs:
             fi
           }
 
+          # The platform declares its TBB digest algorithm as SHA-512: the
+          # Airoha branch of drivers/auth/mbedtls/mbedtls_common.mk pins
+          # TF_MBEDTLS_HASH_ALG_ID := TF_MBEDTLS_SHA512 for CONFIG_ECNT, and
+          # the vendor's own certificate chain is rsassaPss/SHA-512. Omitting
+          # --hash-alg made cert_create use its sha256 default; that chain only
+          # verified because the v2.10 mbed TLS config header compiled SHA-256
+          # in as a side effect. The v2.15 tree swapped in the upstream header,
+          # which enables only TF_MBEDTLS_HASH_ALG_ID, and BL23 then rejected
+          # BL31 with -EAUTH (-80).
           "$CERT_CREATE" -n \
+            --hash-alg sha512 \
             --rot-key signing/tb_key.pem \
             --trusted-world-key signing/tb_key.pem \
             --non-trusted-world-key signing/tb_key.pem \
