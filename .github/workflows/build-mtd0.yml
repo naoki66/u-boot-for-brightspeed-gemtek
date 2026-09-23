@@ -62,13 +62,12 @@ env:
   # 3.6 onwards, so the previous 3.4.1 pin no longer compiles.
   MBEDTLS_REF: 0bebf8b8c7f07abe3571ded48a11aa907a1ffb20
   MTD0_FIP_PLAT_TOC_FLAGS: "1"
-  # The 0x800 bytes before the FIP are not padding and must not be zero.
-  # The vendor bootloader writes the FIP into an erased 2 MiB region
-  # (`mw.b $loadaddr 0xff 0x20000` then `mtd write bl2 $loadaddr 0 0x20000`),
-  # so the accepted prefixes are the vendor's own prefix ("stock", identified
-  # by its ARM NOP sled at mtd0+0) or erased flash ("erased", 0xFF).  A
-  # zero-filled prefix is neither, and a board flashed with one does not boot
-  # from NAND.
+  # The 0x800 bytes before the FIP are not padding: they are the first
+  # executable stage of the NAND boot chain (ARM NOP sled, then `ldr`/`bl`
+  # from mtd0+0x040 on).  Only the vendor's own prefix ("stock") is accepted.
+  # An erased prefix puts 0xFFFFFFFF at mtd0+0x040 and a board flashed with
+  # it produces no serial output at all; recovering it needs a NAND
+  # programmer.  A zero-filled prefix is broken for the same reason.
   MTD0_PREFIX_MODE: "stock"
 
 permissions:
@@ -530,12 +529,20 @@ jobs:
           missing=()
 
           case "$MTD0_PREFIX_MODE" in
-            stock|erased)
+            stock)
+              ;;
+            erased)
+              echo "MTD0_PREFIX_MODE=erased is no longer supported: the first" >&2
+              echo "0x800 bytes of mtd0 are executable bootstrap code, not" >&2
+              echo "padding. An erased prefix puts 0xFFFFFFFF at mtd0+0x040," >&2
+              echo "and a board flashed with it produces no serial output at" >&2
+              echo "all and needs a NAND programmer to recover." >&2
+              exit 1
               ;;
             zero)
               echo "MTD0_PREFIX_MODE=zero is no longer supported: a zero-filled" >&2
-              echo "prefix is neither the vendor prefix nor erased flash and the" >&2
-              echo "board will not boot from NAND. Use stock (preferred) or erased." >&2
+              echo "prefix is not the vendor bootstrap code and the board will" >&2
+              echo "not boot from NAND. Use stock." >&2
               exit 1
               ;;
             *)
@@ -605,32 +612,28 @@ jobs:
 
           cp out/atf/bl2.bin signing/bl2.bin
           cp out/atf/bl31.bin signing/bl31.bin
-          if [ "$MTD0_PREFIX_MODE" = "erased" ]; then
-            echo "Using erased (0xFF) mtd0 prefix before FIP offset ${FIP_OFFSET_DEC}"
-          else
-            if [ -n "$MTD0_PREFIX_B64$MTD0_PREFIX_URL" ]; then
-              restore_binary "mtd0 prefix" "$MTD0_PREFIX_B64" "$MTD0_PREFIX_URL" signing/mtd0-prefix.bin "$MTD0_PREFIX_SHA256" \
-                || missing+=("${BOARD_UPPER}_MTD0_PREFIX_B64 or ${BOARD_UPPER}_MTD0_PREFIX_URL")
-            elif [ -f "${BUNDLED_ASSET_DIR}/mtd0-prefix.bin" ]; then
-              cp "${BUNDLED_ASSET_DIR}/mtd0-prefix.bin" signing/mtd0-prefix.bin
-              # Bundled prefixes ship with a ${BOARD_UPPER}_MTD0_PREFIX_SHA256
-              # variable too; if it is missing we trust the bundled file and
-              # only warn.
-              if [ -n "$MTD0_PREFIX_SHA256" ]; then
-                printf '%s  %s\n' "$MTD0_PREFIX_SHA256" signing/mtd0-prefix.bin | sha256sum -c -
-              else
-                echo "warning: ${BOARD_UPPER}_MTD0_PREFIX_SHA256 not set; trusting bundled mtd0-prefix.bin" >&2
-              fi
+          if [ -n "$MTD0_PREFIX_B64$MTD0_PREFIX_URL" ]; then
+            restore_binary "mtd0 prefix" "$MTD0_PREFIX_B64" "$MTD0_PREFIX_URL" signing/mtd0-prefix.bin "$MTD0_PREFIX_SHA256" \
+              || missing+=("${BOARD_UPPER}_MTD0_PREFIX_B64 or ${BOARD_UPPER}_MTD0_PREFIX_URL")
+          elif [ -f "${BUNDLED_ASSET_DIR}/mtd0-prefix.bin" ]; then
+            cp "${BUNDLED_ASSET_DIR}/mtd0-prefix.bin" signing/mtd0-prefix.bin
+            # Bundled prefixes ship with a ${BOARD_UPPER}_MTD0_PREFIX_SHA256
+            # variable too; if it is missing we trust the bundled file and
+            # only warn.
+            if [ -n "$MTD0_PREFIX_SHA256" ]; then
+              printf '%s  %s\n' "$MTD0_PREFIX_SHA256" signing/mtd0-prefix.bin | sha256sum -c -
             else
-              missing+=("${BOARD_UPPER}_MTD0_PREFIX_B64 / ${BOARD_UPPER}_MTD0_PREFIX_URL / ${BUNDLED_ASSET_DIR}/mtd0-prefix.bin")
+              echo "warning: ${BOARD_UPPER}_MTD0_PREFIX_SHA256 not set; trusting bundled mtd0-prefix.bin" >&2
             fi
+          else
+            missing+=("${BOARD_UPPER}_MTD0_PREFIX_B64 / ${BOARD_UPPER}_MTD0_PREFIX_URL / ${BUNDLED_ASSET_DIR}/mtd0-prefix.bin")
+          fi
 
-            if [ -f signing/mtd0-prefix.bin ]; then
-              prefix_size=$(stat -c%s signing/mtd0-prefix.bin)
-              if (( prefix_size != FIP_OFFSET_DEC )); then
-                echo "mtd0 prefix must be exactly ${FIP_OFFSET_DEC} bytes, got ${prefix_size}" >&2
-                exit 1
-              fi
+          if [ -f signing/mtd0-prefix.bin ]; then
+            prefix_size=$(stat -c%s signing/mtd0-prefix.bin)
+            if (( prefix_size != FIP_OFFSET_DEC )); then
+              echo "mtd0 prefix must be exactly ${FIP_OFFSET_DEC} bytes, got ${prefix_size}" >&2
+              exit 1
             fi
           fi
 
@@ -641,10 +644,7 @@ jobs:
             exit 1
           fi
 
-          images=(signing/bl2.bin signing/bl31.bin)
-          if [ "$MTD0_PREFIX_MODE" = "stock" ]; then
-            images+=(signing/mtd0-prefix.bin)
-          fi
+          images=(signing/bl2.bin signing/bl31.bin signing/mtd0-prefix.bin)
           for image in "${images[@]}"; do
             test -s "$image"
             ls -la "$image"

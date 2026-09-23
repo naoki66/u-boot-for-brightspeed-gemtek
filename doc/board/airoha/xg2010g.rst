@@ -576,31 +576,40 @@ artifact 内也保留固定文件名的 ``ubi-preloader.bin``（BL2 + ``tb-fw-ce
 ``ubi-bl31-uboot.fip``、``bl31.bin`` 和 ``u-boot-raw.bin``，方便救砖时
 直接选择文件。
 
-mtd0 前导区：原厂前缀或已擦除（0xFF），不能用零填充
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+mtd0 前导区：只能是原厂前缀，全 0xFF 或全 0x00 都会砖机
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``mtd0`` 的 ``0x0000..0x07ff`` 不是留白，但也不需要专门写什么"引导代码"。原厂
-U-Boot 自带的 TFTP 刷写助手说明了它到底是什么：
+``mtd0`` 的 ``0x0000..0x07ff`` **不是留白，也不需要另写引导代码，因为它本身
+就是启动链的第一段可执行代码**。反汇编原厂前缀（``board/airoha/xg2010g/firmware/mtd0-prefix.bin``）
+可见：
 
 .. code-block:: text
 
-   boot_tftp_write_bl2=mw.b $loadaddr 0xff 0x20000
-                       setexpr loadaddr_bl2 $loadaddr + 0x800
-                       tftpboot $loadaddr_bl2 $bootfile_bl2 && run mtd_write_bl2
-   mtd_write_bl2=itest.l $filesize -le 0x1f800 && mtd erase bl2 && \
-                 mtd write bl2 $loadaddr 0 0x20000
+   mtd0+0x000  e320f000  nop              (x16，NOP 滑板，无前置分支保护)
+   mtd0+0x040  e59f00cc  ldr r0, [pc,#0xcc]   ← 第一条真实指令
+   mtd0+0x0f4  eb000172  bl  0x6c4
+   mtd0+0x108  eb000186  bl  0x72c
+   mtd0+0x110  ea000057  b   0x274
+   mtd0+0x140  e320f003  wfi
+   mtd0+0x144  eafffffd  b   -3              ← 永久挂起
+   mtd0+0x15c  ec510f0f  mrrc p15, 0, r0, r1, c15
 
-即原厂把一个正好 2 MiB 的缓冲区**整块填 0xFF**，FIP 放在 ``+0x800``，然后整
-2 MiB 写进分区。所以前导区的合法取值是：
+CPU 上电后按顺序执行 16 条 NOP，在 ``+0x040`` 就遇上 ``ldr``，**中间没有任何
+保护分支**。所以：
 
-* **已擦除**（全 ``0xFF``）—— 原厂做法；
-* **原厂前导区**（``mtd0+0`` 是 ARM NOP 滑板 ``0xe320f000``）—— 仓库的
-  ``MTD0_PREFIX_MODE=stock``，最保守，原样保留本机原厂数据。
+* **全 ``0xFF``（已擦除）会砖机**：``mtd0+0x040`` 变成 ``0xFFFFFFFF``，是未定义
+  指令；实测表现为**串口完全不输出**（连 BootROM/XMODEM 提示都没有），只能拆机
+  用 NAND 编程器恢复。**不要**用原厂 U-Boot 的 ``boot_tftp_write_bl2``
+  （``mw.b $loadaddr 0xff 0x20000`` + ``mtd erase/write bl2 ...``）反推"mtd0 前导区
+  可以是 0xFF"——那段助手写的是 ``bl2`` 分区，而 ``bl2`` 分区的内容**不包含**
+  ``mtd0+0`` 这段引导代码，两者要求不同。
+* **全 ``0x00`` 同样会砖机**：``mtd0+0x000`` 变成 ``0x00000000``，也不是原厂引导
+  代码。
 
-**零填充（全 ``0x00``）不是合法取值**：它既不是原厂前缀、也不是已擦除的 flash，
-用这种镜像刷机后设备不从 NAND 启动。CI 因此把 ``MTD0_PREFIX_MODE`` 固定为
-``stock``，并彻底移除了旧的 ``zero`` 模式；U-Boot 恢复服务也同时拒绝全零前导区
-（只接受 NOP 滑板或全 ``0xFF``）。
+唯一合法取值是**原厂前缀**（``MTD0_PREFIX_MODE=stock``），即原样保留本机原厂
+``mtd0`` 的前 ``0x800`` 字节。CI 已把 ``erased`` 和 ``zero`` 两种模式一并移除，
+只接受 ``stock``；U-Boot 恢复服务也只放行 ARM NOP 滑板前缀，遇到 ``0xFF`` 或
+``0x00`` 开头会直接拒绝并在页面上报错，不再写入。
 
 实测确认的 mtd0 字节布局（XG2010G）：
 

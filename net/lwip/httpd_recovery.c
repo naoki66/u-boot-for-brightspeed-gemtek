@@ -347,14 +347,33 @@ static bool recovery_region_is_erased(const u8 *p, size_t len)
 /*
  * Validate the 0x800 bytes that precede the FIP in a bootloader image.
  *
- * Accepted, in order of preference:
- *   - the vendor prefix, identified by its ARM NOP sled at mtd0+0;
- *   - an erased (0xFF) prefix, which is the layout the vendor's own TFTP
- *     helper produces: `mw.b $loadaddr 0xff 0x20000` followed by
- *     `mtd erase bl2 && mtd write bl2 $loadaddr 0 0x20000`.
+ * Only the vendor prefix is accepted, identified by its ARM NOP sled at
+ * mtd0+0.  That prefix is not padding: it is the first executable stage of
+ * the NAND boot chain.  The NOP sled runs from 0x000 to 0x03c with no guard
+ * in front of it, and 0x040 is already `ldr r0, [pc, #0xcc]`; the code then
+ * calls into the second half of the prefix and ends in a `wfi` plus a
+ * self-branch at 0x140:
  *
- * A *zero-filled* prefix is rejected.  It is neither the vendor prefix nor
- * erased flash, and a board flashed with it does not boot from NAND.
+ *   0000  e320f000  nop  (x16)
+ *   0040  e59f00cc  ldr  r0, [pc, #0xcc]
+ *   00f4  eb000172  bl   0x6c4
+ *   0108  eb000186  bl   0x72c
+ *   0110  ea000057  b    0x274
+ *   0140  e320f003  wfi
+ *   0144  eafffffd  b    -3
+ *
+ * An erased (0xFF) prefix therefore puts 0xFFFFFFFF at mtd0+0x40, which is
+ * an undefined instruction.  A board flashed that way produces no serial
+ * output at all -- not even the BootROM/XMODEM banner -- and can only be
+ * recovered with a NAND programmer.  This was confirmed on hardware.
+ *
+ * Do not reintroduce an erased prefix by pointing at the vendor's own TFTP
+ * helper (`mw.b $loadaddr 0xff 0x20000` + `mtd erase/write bl2 ...`): that
+ * helper targets the *bl2 partition*, whose contents do not include the
+ * mtd0+0 bootstrap code.  The two regions have different requirements.
+ *
+ * A zero-filled prefix is rejected for the same reason: mtd0+0 is then
+ * 0x00000000, which is also not the vendor bootstrap code.
  */
 static int recovery_validate_mtd0_prefix(const u8 *p)
 {
@@ -364,25 +383,29 @@ static int recovery_validate_mtd0_prefix(const u8 *p)
 		return 0;
 
 	if (prefix_word == RECOVERY_MTD0_PREFIX_ERASED) {
-		if (recovery_region_is_erased(p, RECOVERY_MTD0_FIP_OFFSET))
-			return 0;
-		printf("Invalid mtd0 bootloader image: prefix starts erased (0x%08x) "
-		       "but is not all 0xFF up to the FIP\n", prefix_word);
+		printf("Refusing mtd0 image: prefix[0x0000]=0x%08x is erased\n",
+		       prefix_word);
+		printf("mtd0+0x000 is executable bootstrap code, not padding; an\n");
+		printf("erased prefix puts 0xFFFFFFFF at mtd0+0x040 and the board\n");
+		printf("then produces no output at all. Rebuild with\n");
+		printf("MTD0_PREFIX_MODE=stock so the vendor prefix is restored.\n");
 		return -EINVAL;
 	}
 
 	if (prefix_word == RECOVERY_MTD0_PREFIX_ZERO) {
-		printf("Invalid mtd0 bootloader image: prefix[0x0000]=0x%08x is zero-filled\n",
+		printf("Refusing mtd0 image: prefix[0x0000]=0x%08x is zero-filled\n",
 		       prefix_word);
-		printf("Neither the vendor prefix (ARM NOP sled 0x%08x) nor erased "
-		       "flash (0xFFFFFFFF) is zero.\n", RECOVERY_MTD0_PREFIX_ARM_NOP);
-		printf("Rebuild with MTD0_PREFIX_MODE=stock (preferred) or =erased.\n");
+		printf("mtd0+0x000 must hold the vendor bootstrap code (ARM NOP sled\n");
+		printf("0x%08x followed by executable instructions).\n",
+		       RECOVERY_MTD0_PREFIX_ARM_NOP);
+		printf("Rebuild with MTD0_PREFIX_MODE=stock.\n");
 		return -EINVAL;
 	}
 
-	printf("Invalid mtd0 bootloader image: prefix[0x0000]=0x%08x\n",
+	printf("Refusing mtd0 image: prefix[0x0000]=0x%08x is not the vendor prefix\n",
 	       prefix_word);
-	printf("Expected the vendor mtd0 prefix (NOP sled) or an erased 0xFF prefix\n");
+	printf("Expected the vendor mtd0 bootstrap code (ARM NOP sled 0x%08x).\n",
+	       RECOVERY_MTD0_PREFIX_ARM_NOP);
 	return -EINVAL;
 }
 
