@@ -461,6 +461,15 @@ enum upload_target {
 };
 static enum upload_target current_target = TARGET_FIRMWARE;
 
+/*
+ * Fixed upload length for a target, or 0 when the length is free.
+ *
+ * TARGET_UBOOT returns RECOVERY_MAX_UBOOT_SIZE, which is the *cap* for that
+ * target (see the mtd0_flexible branch in the upload handler): the mtd0
+ * artifact is prefix + FIP and ends at the FIP, so its length varies per
+ * build.  Callers that need "must be exactly this many bytes" have to exclude
+ * TARGET_UBOOT explicitly.
+ */
 static unsigned long recovery_target_exact_size(enum upload_target tgt)
 {
 	switch (tgt) {
@@ -2315,8 +2324,23 @@ static int recovery_validate_mtd0_bootloader_image(const void *image,
 	u64 fip_flags;
 	int ret;
 
-	if (size != RECOVERY_MAX_UBOOT_SIZE) {
-		printf("mtd0 bootloader image must be exactly 2 MiB: %lu bytes\n",
+	/*
+	 * Accept any image that fits in the bootloader partition instead of
+	 * demanding exactly 2 MiB.  The artifact is shipped as prefix + FIP
+	 * (see scripts/ci/compose-mtd0.py) because everything past the FIP is
+	 * 0xFF padding that neither the BootROM nor BL1/BL2 ever reads: all
+	 * three use fixed offsets and a fixed window length, never "read until
+	 * EOF".  A shorter image is therefore equally bootable, and the erase
+	 * below still covers the whole partition, so the tail ends up 0xFF.
+	 *
+	 * The FIP offset must be present in full, otherwise there is nothing to
+	 * boot at mtd0+0x800; the upper bound stays the partition size.
+	 */
+	if (size <= RECOVERY_MTD0_FIP_OFFSET ||
+	    size > RECOVERY_MAX_UBOOT_SIZE) {
+		printf("mtd0 bootloader image must be > 0x%x and <= %lu bytes: %lu bytes\n",
+		       RECOVERY_MTD0_FIP_OFFSET,
+		       (unsigned long)RECOVERY_MAX_UBOOT_SIZE,
 		       (unsigned long)size);
 		return -EINVAL;
 	}
@@ -3690,8 +3714,9 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
         }
     } else if (recovery_upload_uri_matches(uri, "/upload/uboot")) {
 	/*
-	 * U-Boot maintenance writes only the signed 2 MiB mtd0/bootloader
-	 * image. Old chainloader-slot environment variables are ignored so
+	 * U-Boot maintenance writes only the signed mtd0/bootloader image
+	 * (vendor prefix + FIP, length up to the 2 MiB partition size).
+	 * Old chainloader-slot environment variables are ignored so
 	 * stale recovery_dev_uboot/uboot_ofs values cannot touch factory
 	 * calibration partitions (uenv, dsd) or the UBI firmware partition.
 	 */
@@ -3722,6 +3747,15 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
         ulong exact = recovery_target_exact_size(current_target);
         ulong max;
 
+        /*
+         * The mtd0 upload is the one target whose length is variable: the
+         * artifact ends at the FIP, everything past it is 0xFF padding the
+         * boot chain never reads.  Treat that target as a capped window
+         * (offset must be 0, length <= partition size) and keep the exact
+         * length check for the fixed-size raw partitions (uenv, dsd).
+         */
+        bool mtd0_flexible = current_target == TARGET_UBOOT;
+
         /* Do not accept data that cannot be mapped to a real target. */
         if (!dts_max) {
             printf("httpd: upload target %d is unavailable (ofs 0x%llx)\n",
@@ -3733,14 +3767,24 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
 
         max = dts_max;
 
-        if (current_target == TARGET_FIRMWARE)
+        if (current_target == TARGET_FIRMWARE) {
             min = RECOVERY_MIN_FIRMWARE_SIZE;
-        else if (exact && max > exact)
+        } else if (mtd0_flexible) {
+            /*
+             * mtd0 takes any length that fits inside the bootloader
+             * partition: the artifact ends at the FIP and the 0xFF tail
+             * the old 2 MiB images carried is not read by anyone.  The
+             * cap is the partition size, never the uploaded length.
+             */
+            if (max > RECOVERY_MAX_UBOOT_SIZE)
+                max = RECOVERY_MAX_UBOOT_SIZE;
+        } else if (exact && max > exact) {
             max = exact;
+        }
 
         if (!exact && env_max && env_max < max)
             max = env_max; /* allow env to further cap */
-        if (content_len > 0 && exact &&
+        if (content_len > 0 && exact && !mtd0_flexible &&
             (ulong)content_len != exact) {
             prog_phase = -1;
             printf("httpd: %s upload must be exactly %lu bytes, got %d\n",
@@ -3942,6 +3986,8 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 	const u8 *image = recv_base;
 	u32 image_size = recv_off;
 	unsigned long exact = recovery_target_exact_size(current_target);
+	/* mtd0 images are prefix + FIP and vary in length, see exact_size(). */
+	bool len_flexible = current_target == TARGET_UBOOT;
 	int ret;
 
 	post_ok = 0;
@@ -3952,7 +3998,7 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		return -EINVAL;
 	}
 
-	if (exact && image_size != exact) {
+	if (exact && !len_flexible && image_size != exact) {
 		printf("%s image must be exactly %lu bytes: %u bytes\n",
 		       recovery_upload_target_name(current_target), exact,
 		       image_size);
@@ -3977,9 +4023,15 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 
 	if (current_target == TARGET_UBOOT &&
 	    (target.backend != RECOVERY_BACKEND_MTD || !target.mtd ||
-	     target.ofs != 0 || target.limit != RECOVERY_MAX_UBOOT_SIZE ||
-	     target.limit > target.mtd->size)) {
-		printf("Refusing U-Boot target outside the fixed 2 MiB bootloader region\n");
+	     target.ofs != 0 || !target.limit ||
+	     target.limit > target.mtd->size ||
+	     target.limit > RECOVERY_MAX_UBOOT_SIZE)) {
+		printf("Refusing U-Boot target outside the bootloader region\n");
+		printf("(ofs 0x%llx limit 0x%llx, partition 0x%llx, cap 0x%lx)\n",
+		       (unsigned long long)target.ofs,
+		       (unsigned long long)target.limit,
+		       target.mtd ? (unsigned long long)target.mtd->size : 0ULL,
+		       (unsigned long)RECOVERY_MAX_UBOOT_SIZE);
 		recovery_release_target(&target);
 		prog_phase = -1;
 		return -EINVAL;

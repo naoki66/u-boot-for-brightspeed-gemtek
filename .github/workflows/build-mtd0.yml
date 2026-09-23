@@ -239,6 +239,8 @@ jobs:
           fip_align_dec=$((fip_align))
           if (( mtd0_size_dec != 0x200000 )); then
             echo "${board_upper} mtd0 must stay 0x200000 bytes, got ${mtd0_size}" >&2
+            echo "The bootloader partition size is part of the on-flash layout" >&2
+            echo "and is shared with the DTS and the recovery page gate." >&2
             exit 1
           fi
           if (( fip_offset_dec < 0 || fip_offset_dec >= mtd0_size_dec )); then
@@ -780,7 +782,7 @@ jobs:
             --output out/bootext-bl2.bin
           test -s out/bootext-bl2.bin
 
-      - name: Compose 2 MiB mtd0 image
+      - name: Compose mtd0 image
         if: ${{ steps.signing.outputs.ready == 'true' }}
         env:
           BOARD: ${{ matrix.board }}
@@ -794,7 +796,31 @@ jobs:
             --prefix-mode "$MTD0_PREFIX_MODE" \
             --fip "out/fip-${BOARD}-signed.bin" \
             --output "out/mtd0-bootloader-${BOARD}-signed.bin"
-          test "$(stat -c%s "out/mtd0-bootloader-${BOARD}-signed.bin")" = "${{ steps.params.outputs.mtd0_size_dec }}"
+
+          mtd0_out="out/mtd0-bootloader-${BOARD}-signed.bin"
+          mtd0_bytes=$(stat -c%s "$mtd0_out")
+          fip_bytes=$(stat -c%s "out/fip-${BOARD}-signed.bin")
+          fip_off=$(( ${{ steps.params.outputs.fip_offset }} ))
+          # The artifact is no longer padded to the partition size: it must be
+          # exactly prefix + FIP.  Anything longer means the compose script
+          # silently started padding again, which is what made the writer
+          # demand a 2 MiB upload.
+          test "$mtd0_bytes" = "$(( fip_off + fip_bytes ))" || {
+            echo "mtd0 artifact is $mtd0_bytes bytes, expected $(( fip_off + fip_bytes ))" >&2
+            echo "(= FIP offset $fip_off + FIP $fip_bytes); it must not be padded" >&2
+            exit 1
+          }
+          test "$mtd0_bytes" -le "${{ steps.params.outputs.mtd0_size_dec }}" || {
+            echo "mtd0 artifact $mtd0_bytes exceeds partition ${{ steps.params.outputs.mtd0_size_dec }}" >&2
+            exit 1
+          }
+          # The prefix is executable boot code, so an all-0xFF or all-0x00 head
+          # bricks the board (see MTD0_PREFIX_MODE above); assert it survived.
+          test "$(head -c 4 "$mtd0_out" | od -An -tx1 | tr -d ' \n')" = "00f020e3" || {
+            echo "mtd0 prefix is not the vendor ARM NOP sled (0xe320f000)" >&2
+            exit 1
+          }
+          echo "mtd0 artifact: ${mtd0_bytes} bytes (FIP ends at 0x$(printf '%x' "$mtd0_bytes"))"
 
       - name: Prepare artifacts
         id: artifact
@@ -988,7 +1014,7 @@ jobs:
 
           ## Files (per selected board)
 
-          - \`<board>-${RELEASE_DATE}-${COMMIT}-mtd0-signed.bin\` - 2 MiB \`/dev/mtd0\` bootloader image. Contains preserved prefix, BL2, BL31, signed certificates, and this repository's U-Boot as BL33.
+          - \`<board>-${RELEASE_DATE}-${COMMIT}-mtd0-signed.bin\` - \`/dev/mtd0\` bootloader image, sized to its content (vendor prefix + signed FIP, no 0xFF tail padding). Contains the preserved prefix, BL2, BL31, signed certificates, and this repository's U-Boot as BL33. Write it at offset 0 of the \`bootloader\` partition; every byte after the image is never read by the BootROM or BL1/BL2, so no padding is required.
           - \`<board>-${RELEASE_DATE}-${COMMIT}-fip-signed.bin\` - signed FIP only, placed at the configured mtd0 FIP offset.
           - \`<board>-${RELEASE_DATE}-${COMMIT}-ubi-preloader.bin\` - signed FIP containing the compiled BL2 and its content certificate for XMODEM recovery.
           - \`<board>-${RELEASE_DATE}-${COMMIT}-ubi-bl31-uboot.fip\` - BL31 + U-Boot FIP for the second XMODEM recovery transfer.

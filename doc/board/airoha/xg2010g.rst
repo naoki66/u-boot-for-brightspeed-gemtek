@@ -466,8 +466,15 @@ artifact：
 * 使用 ``cert_create`` 为 ``--tb-fw`` BL2、``--soc-fw`` BL31 和
   ``--nt-fw`` BL33 压缩载荷生成证书链；
 * 使用 ``fiptool create`` 生成 signed FIP；
-* 将 FIP 写入 2 MiB mtd0 镜像中的 ``0x800`` 偏移，前导区保持原厂内容，
-  其余尾部填充 ``0xff``。
+* 将 FIP 拼接在原厂前导区之后（偏移 ``0x800``），**镜像到此结束**，不再
+  用 ``0xFF`` 填满整个 2 MiB 分区。
+
+镜像按实际内容打包的原因是启动链**从不按"读到 EOF"读取 mtd0**：BootROM、
+BL1 和 BL2 都用固定偏移加固定窗口长度（``PLAT_ECNT_FIP_OFFSET`` /
+``PLAT_ECNT_FIP_MAX_SIZE``）。FIP 之后的 ``0xFF`` 填充没有任何读者，只会
+把 artifact 撑到 2 MiB，并迫使写入侧只接受 2 MiB 的上传。镜像长度之后的
+区域由写入侧在**擦除阶段**统一处理——写入前整段擦到擦除块边界，那部分自然
+就是 ``0xFF``，不需要镜像自带。
 
 默认仓库变量（每板各自一份，以 ``${BOARD_UPPER}_*`` 命名；XG2010G 见
 下表，XR1710G 见 :doc:`xr1710g`）如下：
@@ -481,7 +488,7 @@ artifact：
      - 说明
    * - ``XG2010G_MTD0_SIZE``
      - ``0x200000``
-     - mtd0/bootloader 固定 2 MiB，禁止越界到 uenv 或 dsd
+     - mtd0/bootloader 分区大小，作为镜像长度上限（不是填充长度）；禁止越界到 uenv 或 dsd
    * - ``XG2010G_FIP_OFFSET``
      - ``0x800``
      - 原厂 mtd0 中 FIP 起始位置
@@ -643,7 +650,7 @@ CPU 上电后按顺序执行 16 条 NOP，在 ``+0x040`` 就遇上 ``ldr``，**�
      - 证书链（到 ``0x73248`` 结束）
    * - ``0x073248``
      - ``0x18cdb8``
-     - ``0xFF`` 填充到 2 MiB
+     - 历史镜像里的 ``0xFF`` 填充；新的 artifact 不再带这一段，镜像在 FIP 结束处收尾
 
 串口 TFTP 救砖与启动菜单
 ------------------------
@@ -661,7 +668,7 @@ X 模式依赖 BootROM 和串口，Web Recovery 依赖 U-Boot 的 lwIP 网络栈
     ipaddr=192.168.0.1      netmask=255.255.255.0      serverip=192.168.0.254
     tftpboot_addr=0x90000000        # 暂存区，刻意不用 $loadaddr
     tftpverify_addr=0x94000000      # 读回比对区
-    tftpboot_size=0x200000          # 完整 mtd0 镜像长度
+    tftpboot_size=0x200000          # 分区大小上限（镜像本身按实际长度打包）
 
 ``tftpboot_addr`` 与 ``$loadaddr`` 分开是有意为之：Web Recovery 的上传缓冲在
 ``recovery_addr``（``0x81800000``），分开可以避免 TFTP 传输和正在进行的 HTTP
@@ -683,7 +690,7 @@ X 模式依赖 BootROM 和串口，Web Recovery 依赖 U-Boot 的 lwIP 网络栈
    * - 变量
      - 作用
    * - ``run tftp_flash``
-     - 写完整 2 MiB ``mtd0`` 到 ``bootloader`` 分区（自带 0x800 前导区）
+     - 写 ``mtd0`` 到 ``bootloader`` 分区（镜像按实际长度打包，自带 0x800 前导区）
    * - ``run tftp_flash_fit``
      - 把系统固件写进 UBI 的 ``fit`` 卷
    * - ``run tftp_flash_uenv`` / ``run tftp_flash_dsd``
@@ -891,7 +898,8 @@ X 模式加载临时引导。该流程需要 TTL 串口和支持 XMODEM 的终�
 7. 在恢复页上传。左侧有三个目标，页面只有一个文件选择框，按目标选文件：
 
    * ``Firmware Recovery``：``ubi-squashfs-sysupgrade.itb``；
-   * ``Update U-Boot``：``...-mtd0-signed.bin``，**必须正好 2 MiB**。
+   * ``Update U-Boot``：``...-mtd0-signed.bin``，长度 ``0x800`` + FIP 长度
+     （约 465 KiB），**不大于 2 MiB**；镜像不再带 ``0xFF`` 尾部填充。
 
    两个目标写的是不同区域（``bootloader`` 分区与 ``ubi`` 分区），互不影响。
 
